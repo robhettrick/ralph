@@ -45,16 +45,50 @@ This places `ralph` in `~/.local/bin/`, default prompts in `~/.config/ralph/prom
 |----------------------|----------------------------------------------------------|
 | `-n`, `--iterations` | Max iterations                                           |
 | `-g`, `--goal`       | Goal injected into the prompt template                   |
-| `-m`, `--model`      | Model to use (default depends on backend)                |
+| `-m`, `--model`      | Pin one model for all iterations, overriding per-item tiers |
 | `-b`, `--backend`    | Backend to use: `claude`, `codex`, `copilot`, `pi` (default: `claude`) |
 | `--skip-push`        | Don't push after each build iteration (plan and review never push) |
 | `--dry-run`          | Print what would be executed without running              |
 | `--no-metrics`       | Don't record per-iteration metrics under `.ralph/metrics/` |
+| `-s`, `--stream`     | Live, readable activity log while each iteration runs (claude backend) |
 | `-h`, `--help`       | Show help                                                |
 
 ### Review
 
 `ralph review` runs a single read-only verification pass over the current branch: it diffs against the merge base with the default branch, maps every substantive change back to a spec or plan item, flags over-engineering (speculative abstraction, single-caller indirection, pattern duplication), and checks test integrity (weakened, deleted, or missing tests) and guardrail conformance. The output is `REVIEW.md` — verdict, traceability table, severity-ordered findings, and questions for the author — and nothing else: no source edits, no commits, no pushes. Use `-g` to narrow the focus or name a different diff base, and `-n` to run more than one pass. `REVIEW.md` is local-only (gitignored by `ralph init`), like the other loop artifacts.
+
+### Watching a run
+
+By default the loop is silent while an iteration runs, then prints the backend's
+final message. `--stream` (or `-s`) renders the event stream as it arrives, so a
+long run can be watched rather than waited out:
+
+```
+=================================== ITERATION 3 / 12 ===================================
+
+Next:    [sonnet] Add GET /reference/{id} — single-record lookup.
+
+    · I'll start with Phase 1 — understanding the current state.
+    → Bash Read tail of progress
+    → Read sam-frontend/src/server/routes/reference/index.js
+    → Edit sam-frontend/src/server/routes/reference/index.js
+    · Now Phase 3 — verify.
+    → Bash Run the frontend test suite
+    ✗ ENOENT: no such file
+    → Skill commit
+    ◆ success · 48 turns · $2.38
+```
+
+Each line is one event: `·` the agent's own commentary, `→` a tool call (its
+description, or the file it touched), `✗` a tool call that failed, and `◆` the
+end-of-iteration summary. Thinking blocks and successful tool output are left
+out — the log is a summary of what happened, not a transcript.
+
+This is not `--verbose`, which exists for debugging the pipeline: that prints the
+backend command, the raw JSON, and exit codes, after the fact. The two can be
+combined. `--stream` needs a backend that emits per-event JSON, which today means
+`claude`; the others return a single response at the end, and the flag says so at
+startup rather than doing nothing quietly.
 
 ### Loop metrics
 
@@ -70,12 +104,13 @@ ralph sandbox clean                                 # remove the container
 ralph plan                                          # analyse and plan
 ralph plan -g "Migrate to hexagonal architecture"   # plan with a goal
 ralph build                                         # implement next item
-ralph build -n 10 -m sonnet                         # 10 iterations with sonnet
+ralph build -n 10 -m sonnet                         # 10 iterations, sonnet pinned (ignores tiers)
 ralph build -b codex                                # build using codex backend
 ralph plan -b codex -g "design the auth module"     # plan with codex
 ralph build --dry-run -b codex                      # dry-run with codex
 ralph build -b copilot -n 10                        # 10 iterations with copilot
 ralph build -b pi -n 10                             # 10 iterations with pi
+ralph build --stream                                # watch the run as a readable log
 ralph review                                        # review the branch, write REVIEW.md
 ralph review -g "Focus on FT-001 rule coverage"     # review with a focus
 ralph archive                                       # archive before starting fresh
@@ -236,22 +271,57 @@ Ralph runs backends in non-interactive pipe mode, which cannot prompt for tool a
 
 ### Model selection
 
-The default model depends on the selected backend:
+Build iterations vary in reasoning demand: adding an endpoint alongside
+existing ones is cheaper work than reconciling contradictory specs. So in
+`build` mode ralph picks the model **per iteration**, from the tier the
+planning agent marked on that index entry:
+
+```markdown
+- [ ] (light) **Add PATCH /reference/{id}** — accept partial updates. → [007-patch.md](plan/007-patch.md)
+```
+
+| Tier    | Meaning                                                                              | `claude` | `codex`              |
+|---------|--------------------------------------------------------------------------------------|----------|----------------------|
+| `light` | Follows an established pattern, specs are clear, changes are localised                | `sonnet` | `gpt-5.2-codex-mini` |
+| `heavy` | Cross-cutting refactors, spec reconciliation, debugging of unknown cause              | `opus`   | `gpt-5.2-codex`      |
+
+The marker sits on the index line rather than in the task file, so the loop
+chooses the model without opening `plan/NNN-*.md` first.
+
+Tiers are deliberately abstract rather than model names: `IMPLEMENTATION_PLAN.md`
+is an append-only ledger that any backend may run, so each backend maps the tier
+into its own namespace. Backends with no cheaper tier worth using map both to the
+same model, and plans whose entries carry no marker simply use the backend
+default throughout.
+
+`ralph metrics` reports cost per model, so you can see what the split bought:
+
+```
+By model:
+  opus: 4 iterations · cost $12.60 · plan items 4
+  sonnet: 9 iterations · cost $3.15 · plan items 9
+```
+
+Resolution order is **`-m` flag → item tier → backend default**. The default
+model per backend is:
 
 - `claude` backend: `opus`
 - `codex` backend: `gpt-5.2-codex`
 - `copilot` backend: `claude-sonnet-4.6`
 - `pi` backend: `anthropic/claude-opus-4-8`
 
-The `-m` flag overrides the default for whichever backend is active:
+The `-m` flag pins one model for every iteration, ignoring tiers entirely:
 
 ```bash
-ralph build -m sonnet          # faster and cheaper (claude backend)
-ralph plan -m opus             # better for complex reasoning (claude backend)
-ralph build -b codex           # uses gpt-5.2-codex by default
+ralph build -m sonnet          # pin sonnet for the whole run, ignore tiers
+ralph plan -m opus             # plan and review are single passes — always one model
+ralph build -b codex           # uses gpt-5.2-codex / -mini per tier
 ralph build -b codex -m o3     # override codex model
 ralph build -b copilot         # uses claude-sonnet-4.6 by default
 ```
+
+Tiering applies to `build` only — `plan` and `review` are single passes over the
+whole plan, with no per-item work to tier.
 
 ## Development
 

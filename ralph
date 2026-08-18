@@ -35,16 +35,33 @@ RETRY_RESET_MAX_WAIT_SECONDS=$((60 * 60 * 5 + 60 * 30))  # 5.5 hours (30m buffer
 
 SUPPORTED_BACKENDS=(claude codex copilot pi)
 
+# --- Per-item model tiers ---
+# Build iterations vary in reasoning demand: implementing an item that follows
+# an established pattern is cheaper work than reconciling specs or debugging an
+# unknown failure. The planning agent tags each plan item with a tier, and each
+# backend maps the tier to one of its own model ids via BACKEND_TIER_MODELS.
+#
+# Tiers are abstract on purpose. IMPLEMENTATION_PLAN.md is an append-only
+# ledger read by every backend, so a concrete model name in the plan would
+# couple it to one backend's namespace (a plan saying "sonnet" is nonsense to
+# codex) and rot as model ids churn. A backend with no meaningful split maps
+# every tier to the same id, degrading to fixed-model behaviour.
+SUPPORTED_TIERS=(light heavy)
+
 # shellcheck disable=SC2034  # Variables are set here and consumed in cmd_loop
 backend_claude() {
     BACKEND_NAME="claude"
     BACKEND_CLI="claude"
     BACKEND_DEFAULT_MODEL="opus"
+    declare -gA BACKEND_TIER_MODELS=([light]="sonnet" [heavy]="opus")
     BACKEND_PERMISSION_FLAG="--dangerously-skip-permissions"
     BACKEND_PERMISSION_WARNING="Claude will have unrestricted access to tools (file writes, shell commands, etc)."
     BACKEND_JQ_FLAGS=(-r)
     BACKEND_JQ_FILTER='select(.type == "result") | .result // empty'
     BACKEND_STDIN_PROMPT=true
+    # Emits one JSON event per line as work happens, so --stream can render a
+    # live activity log. Backends that return a single blob at the end set false.
+    BACKEND_STREAMS_EVENTS=true
     # shellcheck disable=SC2317,SC2329  # Invoked indirectly via resolve_backend
     build_backend_cmd() {
         local model="$1"
@@ -57,11 +74,13 @@ backend_codex() {
     BACKEND_NAME="codex"
     BACKEND_CLI="codex"
     BACKEND_DEFAULT_MODEL="gpt-5.2-codex"
+    declare -gA BACKEND_TIER_MODELS=([light]="gpt-5.2-codex-mini" [heavy]="gpt-5.2-codex")
     BACKEND_PERMISSION_FLAG="--dangerously-bypass-approvals-and-sandbox"
     BACKEND_PERMISSION_WARNING="Codex will have unrestricted access to tools (file writes, shell commands, etc)."
     BACKEND_JQ_FLAGS=(-rs)
     BACKEND_JQ_FILTER='(map(select(.item.type == "agent_message")) | last | .item.text // null) // ([ .[] | select(.item.type == "command_execution" and .item.status == "completed") | "$ " + .item.command + "\n" + (.item.aggregated_output // "") ] | join("\n") | if . == "" then null else . end) // empty'
     BACKEND_STDIN_PROMPT=false
+    BACKEND_STREAMS_EVENTS=false
     # shellcheck disable=SC2317,SC2329  # Invoked indirectly via resolve_backend
     build_backend_cmd() {
         local model="$1"
@@ -74,11 +93,15 @@ backend_copilot() {
     BACKEND_NAME="copilot"
     BACKEND_CLI="copilot"
     BACKEND_DEFAULT_MODEL="claude-sonnet-4.6"
+    # Copilot's catalogue has no cheaper tier worth dropping to for build work;
+    # both tiers resolve to the same model until one exists.
+    declare -gA BACKEND_TIER_MODELS=([light]="claude-sonnet-4.6" [heavy]="claude-sonnet-4.6")
     BACKEND_PERMISSION_FLAG="--yolo"
     BACKEND_PERMISSION_WARNING="Copilot will have unrestricted access to tools (file writes, shell commands, etc)."
     BACKEND_JQ_FLAGS=(-rs)
     BACKEND_JQ_FILTER='(map(select(.type == "assistant.message")) | last | .data.content // null) // ([ .[] | select(.type == "tool.execution_complete" and .data.success == true) | (.data.result.content // .data.result.detailedContent // "") ] | join("\n") | if . == "" then null else . end) // empty'
     BACKEND_STDIN_PROMPT=false
+    BACKEND_STREAMS_EVENTS=false
     # shellcheck disable=SC2317,SC2329  # Invoked indirectly via resolve_backend
     build_backend_cmd() {
         local model="$1"
@@ -93,6 +116,10 @@ backend_pi() {
     # Pi's default provider is google, so a bare 'opus' would resolve there;
     # pin the fully-qualified provider/id to land on Anthropic.
     BACKEND_DEFAULT_MODEL="anthropic/claude-opus-4-8"
+    declare -gA BACKEND_TIER_MODELS=(
+        [light]="anthropic/claude-sonnet-4-6"
+        [heavy]="anthropic/claude-opus-4-8"
+    )
     # Pi has no permission flag — its built-in tools run without prompting,
     # so build_backend_cmd omits the positional entirely (no stray empty arg).
     BACKEND_PERMISSION_FLAG=""
@@ -107,6 +134,7 @@ backend_pi() {
     # shellcheck disable=SC2016  # $ae/$calls/$text are jq variables, not shell
     BACKEND_JQ_FILTER='(map(select(.type == "agent_end")) | last) as $ae | ([($ae.messages // [])[] | select(.role == "assistant")] | last | (.content // []) | map(select(.type == "text") | .text) | join("") | if . == "" then null else . end) // (([($ae.messages // [])[] | select(.role == "assistant") | (.content // [])[] | select(.type == "toolCall") | {key: .id, value: .}] | from_entries) as $calls | [($ae.messages // [])[] | select(.role == "toolResult" and .isError == false) | ((.content // []) | map(select(.type == "text") | .text) | join("")) as $text | if .toolName == "bash" then "$ " + ($calls[.toolCallId].arguments.command // "") + "\n" + $text else $text end] | join("\n") | if . == "" then null else . end) // empty'
     BACKEND_STDIN_PROMPT=true
+    BACKEND_STREAMS_EVENTS=false
     # shellcheck disable=SC2317,SC2329  # Invoked indirectly via resolve_backend
     build_backend_cmd() {
         local model="$1"
@@ -170,11 +198,16 @@ Init options:
 Options:
   -n, --iterations N   Max iterations (plan default: 3, build default: from plan, review default: 1)
   -g, --goal TEXT      Goal to inject into the prompt template
-  -m, --model MODEL    Model to use (default depends on backend)
+  -m, --model MODEL    Pin one model for every iteration, overriding the
+                       per-item tiers in IMPLEMENTATION_PLAN.md
+                       (default: per-item tiers in build mode, else the
+                       backend default)
   -b, --backend NAME   Backend to use: claude, codex, copilot, pi (default: claude)
       --skip-push      Don't push after each build iteration (plan never pushes)
       --dry-run        Print what would be executed without running
       --no-metrics     Don't record per-iteration metrics under .ralph/metrics/
+  -s, --stream         Show a readable live activity log while each iteration
+                       runs (claude backend only)
   -v, --verbose        Show backend commands, raw output, and exit codes
   -y, --yes            Skip the confirmation when running outside a sandbox
       --max-retries-per-iteration N
@@ -188,7 +221,8 @@ Examples:
   ralph plan
   ralph plan -n 2
   ralph plan -g "Migrate to hexagonal architecture"
-  ralph build -n 10 -m sonnet
+  ralph build -n 10 -m sonnet        # pin one model, ignore per-item tiers
+  ralph build --stream               # watch the run as a readable activity log
   ralph build -b codex
   ralph build --iterations 5 --goal "Add PATCH endpoint"
   ralph build --max-retries-per-iteration 3
@@ -733,9 +767,10 @@ format_duration() {
 }
 
 # First incomplete item in IMPLEMENTATION_PLAN.md, stripped of the checkbox
-# prefix, markdown emphasis, and the trailing link to its task file — the item
-# the build prompt directs the agent to pick next. Empty when the file is absent
-# or every item is complete.
+# prefix, the tier marker, markdown emphasis, and the trailing link to its task
+# file — the item the build prompt directs the agent to pick next. Empty when
+# the file is absent or every item is complete. The tier is announced
+# separately, from plan_item_tier, next to the model it resolved to.
 #
 # Done in a single sed that quits at the first match rather than piping into
 # head: under `set -o pipefail` a head that closes the pipe early makes the
@@ -743,11 +778,151 @@ format_duration() {
 next_plan_item() {
     sed -nE '/^- \[ \]/{
         s/^- \[ \] *//
+        s/^\([A-Za-z]+\)[[:space:]]*//
         s/\*\*//g
         s/[[:space:]]*(→|->)?[[:space:]]*\[[^]]*\]\([^)]*\)[[:space:]]*$//
         p
         q
     }' IMPLEMENTATION_PLAN.md 2>/dev/null
+}
+
+# Tier of the first incomplete index entry, lowercased — the item
+# next_plan_item announces and the build agent is directed to pick. Written as
+# a `(light)`/`(heavy)` marker right after the checkbox, so the loop can choose
+# the model without opening the task file. Empty when the file is absent, every
+# item is complete, or the entry carries no marker (plans predating the tier,
+# and hand-written ones, leave it off; callers fall back).
+plan_item_tier() {
+    sed -nE '/^- \[ \]/{
+        s/^- \[ \][[:space:]]*\(([A-Za-z]+)\).*/\1/p
+        q
+    }' IMPLEMENTATION_PLAN.md 2>/dev/null | tr '[:upper:]' '[:lower:]'
+}
+
+# True when any incomplete entry carries a tier marker — i.e. the index was
+# written by a tier-aware planner. Plans without them resolve every iteration
+# to the run-level model, so the run reports a single model rather than
+# advertising a tier map that never applies.
+plan_uses_tiers() {
+    grep -qE '^- \[ \][[:space:]]*\([A-Za-z]+\)' IMPLEMENTATION_PLAN.md 2>/dev/null
+}
+
+# Model for this iteration: the tier's mapping when the plan names a known
+# tier, otherwise the run-level model. An unrecognised tier is a planner
+# mistake, not a reason to abort a long build — it warns and falls back.
+resolve_tier_model() {
+    local tier="$1" fallback="$2"
+    if [[ -z "$tier" ]]; then
+        echo "$fallback"
+        return
+    fi
+    if [[ -n "${BACKEND_TIER_MODELS[$tier]:-}" ]]; then
+        echo "${BACKEND_TIER_MODELS[$tier]}"
+        return
+    fi
+    echo "Warning: unknown tier '$tier' in IMPLEMENTATION_PLAN.md; using $fallback" >&2
+    echo "$fallback"
+}
+
+# --- Live activity log (--stream) ---
+#
+# --verbose exists for diagnosing the pipeline: it dumps the raw JSON after the
+# fact. This renders the same stream as it arrives, as readable lines — what the
+# agent said, which tool it reached for, and how each call turned out — so a
+# long run can be watched rather than autopsied.
+#
+# Only the claude backend emits a per-event stream (BACKEND_STREAM_FILTER);
+# the others return one blob at the end, so --stream is a no-op there and the
+# flag says so at startup rather than silently doing nothing.
+
+# Truncate to a terminal-friendly width, collapsing newlines so a multi-line
+# command or message stays on one line.
+#
+# Over-long paths are elided from the left, not the right: the filename is the
+# identifying part, and truncating a deep path from the right leaves every line
+# looking the same. Prose is truncated from the right as usual.
+stream_oneline() {
+    local text="$1" max="${2:-100}"
+    text=${text//$'\n'/ }
+    text=$(printf '%s' "$text" | tr -s ' ')
+    if [[ ${#text} -le $max ]]; then
+        printf '%s' "$text"
+        return
+    fi
+    if [[ "$text" != *' '* && "$text" == */?* ]]; then
+        printf '…%s' "${text: -$((max - 1))}"
+    else
+        printf '%s…' "${text:0:$((max - 1))}"
+    fi
+}
+
+# Reads stream-json on stdin, writes human-readable lines to stdout. Unparseable
+# lines are skipped: this is a view, and it must never interfere with the run.
+format_stream() {
+    local indent="    "
+    local line type
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        type=$(jq -r 'try .type // empty' <<<"$line" 2>/dev/null) || continue
+        case "$type" in
+            assistant)
+                # The agent's own commentary, then each tool it invoked. Tool
+                # calls print their description when the backend supplies one
+                # (Bash does), else the most identifying input field.
+                jq -r '
+                    (.message.content // [])[]
+                    | if .type == "text" then
+                        # A long sign-off arrives as one multi-paragraph block;
+                        # emit each non-empty line separately so every rendered
+                        # line carries its own marker.
+                        (.text | split("\n")[] | gsub("^\\s+|\\s+$"; "")) as $t
+                        | if $t == "" then empty else "· " + $t end
+                      elif .type == "tool_use" then
+                        # Paths are shown relative to the workspace root: the
+                        # container prefix is identical on every line and only
+                        # pushes the filename off the end.
+                        ((.input.file_path // "") | sub("^/workspace/"; "")) as $path
+                        | "→ " + .name + " " + (
+                            .input.description
+                            // (if $path == "" then null else $path end)
+                            // .input.command
+                            // .input.skill
+                            // .input.pattern
+                            // .input.prompt
+                            // ""
+                        )
+                      else empty end' <<<"$line" 2>/dev/null \
+                | while IFS= read -r rendered; do
+                    [[ -z "$rendered" ]] && continue
+                    printf '%s%s\n' "$indent" "$(stream_oneline "$rendered" 110)"
+                done
+                ;;
+            user)
+                # Tool results: report failures only. Successes are implied by
+                # the next step, and echoing them back doubles the log.
+                jq -r '
+                    (.message.content // [])[]
+                    | select(.type == "tool_result" and .is_error == true)
+                    | "✗ " + ((.content // "") | if type == "array"
+                        then (map(.text // "") | join(" ")) else tostring end)' <<<"$line" 2>/dev/null \
+                | while IFS= read -r rendered; do
+                    [[ -z "$rendered" ]] && continue
+                    printf '%s%s\n' "$indent" "$(stream_oneline "$rendered" 110)"
+                done
+                ;;
+            result)
+                jq -r '
+                    "◆ " + (.subtype // "done")
+                    + (if .num_turns then " · " + (.num_turns | tostring) + " turns" else "" end)
+                    + (if .total_cost_usd then " · $" + (((.total_cost_usd * 100 | round) / 100) | tostring) else "" end)' \
+                    <<<"$line" 2>/dev/null \
+                | while IFS= read -r rendered; do
+                    [[ -n "$rendered" ]] && printf '%s%s\n' "$indent" "$rendered"
+                done
+                ;;
+        esac
+    done
+    return 0
 }
 
 # --- Metrics capture ---
@@ -871,13 +1046,14 @@ cmd_metrics() {
 
     local table
     table=$({
-        printf 'ITER\tWALL\tAPI\tTURNS\tCOST\tTOK_IN\tTOK_OUT\tCACHE_RD\tCOMMITS\t+/-\tPLAN\tTOP_TOOLS\n'
+        printf 'ITER\tMODEL\tWALL\tAPI\tTURNS\tCOST\tTOK_IN\tTOK_OUT\tCACHE_RD\tCOMMITS\t+/-\tPLAN\tTOP_TOOLS\n'
         jq -r '
             def fmtd: if . == null then "-"
               elif . >= 3600 then "\(. / 3600 | floor)h\(. % 3600 / 60 | floor)m"
               elif . >= 60 then "\(. / 60 | floor)m\(. % 60)s"
               else "\(.)s" end;
             [ .iteration,
+              (.model // "-"),
               (.wall_s | fmtd),
               (.api_s | fmtd),
               (.turns // "-"),
@@ -914,6 +1090,23 @@ cmd_metrics() {
           + " · plan items \(map(.plan_items_completed) | add)"
           + " · noop iterations \([.[] | select(.git.noop)] | length)"
         ' "$file"
+
+    # Per-model breakdown, printed only for mixed-model runs (per-item tiering):
+    # a single-model run says nothing here that the totals line doesn't.
+    jq -rs '
+        (group_by(.model // "-") | map({
+            model: (.[0].model // "-"),
+            iterations: length,
+            cost: (map(.cost_usd // 0) | add),
+            plan_items: (map(.plan_items_completed) | add)
+         })) as $by
+        | if ($by | length) < 2 then empty else
+            "By model:\n" + ($by | sort_by(-.cost) | map(
+                "  \(.model): \(.iterations) iterations"
+                + " · cost $\((.cost * 100 | round) / 100)"
+                + " · plan items \(.plan_items)"
+            ) | join("\n"))
+          end' "$file"
 }
 
 cmd_loop() {
@@ -924,27 +1117,30 @@ cmd_loop() {
     local max_iterations=""
     local goal=""
     local model=""
+    local model_explicit=false
     local backend=""
     local skip_push=false
     local dry_run=false
     local verbose=false
+    local stream=false
     local assume_yes=false
     local max_retries_opt=""
     local no_retry=false
     local no_metrics=false
 
-    ARGS=$(getopt -o n:g:m:b:vyh --long iterations:,goal:,model:,backend:,skip-push,dry-run,no-metrics,verbose,yes,help,max-retries-per-iteration:,no-retry -n 'ralph' -- "$@")
+    ARGS=$(getopt -o n:g:m:b:svyh --long iterations:,goal:,model:,backend:,skip-push,dry-run,no-metrics,stream,verbose,yes,help,max-retries-per-iteration:,no-retry -n 'ralph' -- "$@")
     eval set -- "$ARGS"
 
     while true; do
         case "$1" in
             -n|--iterations) max_iterations="$2"; shift 2 ;;
             -g|--goal)       goal="$2";           shift 2 ;;
-            -m|--model)      model="$2";          shift 2 ;;
+            -m|--model)      model="$2"; model_explicit=true; shift 2 ;;
             -b|--backend)    backend="$2";        shift 2 ;;
             --skip-push)     skip_push=true;      shift ;;
             --dry-run)       dry_run=true;        shift ;;
             --no-metrics)    no_metrics=true;     shift ;;
+            -s|--stream)     stream=true;         shift ;;
             -v|--verbose)    verbose=true;        shift ;;
             -y|--yes)        assume_yes=true;     shift ;;
             --max-retries-per-iteration) max_retries_opt="$2"; shift 2 ;;
@@ -1019,8 +1215,30 @@ cmd_loop() {
     local current_branch
     current_branch=$(git branch --show-current)
 
-    # Build the backend command array now that model is resolved
+    # Per-item tiering applies to build mode only (plan and review are single
+    # passes over the whole plan, with no per-item work to tier), an explicit
+    # -m always wins — otherwise the flag would be a lie — and the plan has to
+    # actually use tiers, so untiered plans keep reporting one model.
+    local tiering_enabled=false
+    if [[ "$mode" == "build" ]] && ! $model_explicit && plan_uses_tiers; then
+        tiering_enabled=true
+    fi
+
+    # Build the backend command array now that model is resolved. Under
+    # tiering this is rebuilt per iteration from the plan item's tier.
     build_backend_cmd "$model"
+
+    # --stream renders a live activity log, but only backends that emit
+    # per-event JSON have anything to render. Say so once at startup rather
+    # than accepting the flag and quietly doing nothing.
+    local stream_live=false
+    if $stream; then
+        if [[ "${BACKEND_STREAMS_EVENTS:-false}" == "true" ]]; then
+            stream_live=true
+        else
+            echo "Note: --stream needs a backend that emits per-event JSON; '$BACKEND_NAME' returns one response at the end, so there is nothing to stream." >&2
+        fi
+    fi
 
     # Metrics capture (on by default for real runs; see --no-metrics)
     local metrics_enabled=true
@@ -1045,7 +1263,17 @@ cmd_loop() {
     echo "Backend: $BACKEND_NAME"
     truncate_line "Prompt:  $prompt_file" "$line_width"
     echo "Branch:  $current_branch"
-    echo "Model:   $model"
+    if $tiering_enabled; then
+        # Tiers are resolved per iteration, so a single run-level model line
+        # would be wrong; show the map, and the resolved id next to each item.
+        local tier_summary="" t
+        for t in "${SUPPORTED_TIERS[@]}"; do
+            tier_summary+="${tier_summary:+, }$t=${BACKEND_TIER_MODELS[$t]}"
+        done
+        truncate_line "Model:   per item ($tier_summary; untiered: $model)" "$line_width"
+    else
+        echo "Model:   $model"
+    fi
     echo "Max:     $max_iterations iterations"
     [[ -n "$goal" ]] && truncate_line "Goal:    $goal" "$line_width"
     $metrics_enabled && truncate_line "Metrics: $metrics_file" "$line_width"
@@ -1083,6 +1311,11 @@ cmd_loop() {
         fi
     fi
 
+    # fd 3 is the loop's real stdout. Inside the iteration the backend's stdout
+    # is captured by command substitution, so the live formatter writes here to
+    # reach the terminal without polluting what jq and the metrics file see.
+    exec 3>&1
+
     local iteration=0
     local consecutive_noops=0
 
@@ -1104,13 +1337,30 @@ cmd_loop() {
         # silent until the backend finishes. Build mode works the plan top
         # down, so the first incomplete entry is what this iteration will
         # attempt; re-read each iteration because the previous one moves it.
+        #
+        # The same read resolves this iteration's model when tiering is on: the
+        # item about to be attempted decides which model attempts it, so
+        # BACKEND_CMD is rebuilt here rather than once before the loop.
+        local iter_model="$model"
         if [[ "$mode" == "build" ]]; then
             local next_item
             # An unreadable plan must not abort the loop: announcing is a
             # convenience, so fall back to silence rather than failing.
             next_item=$(next_plan_item) || next_item=""
+
+            if $tiering_enabled; then
+                local iter_tier
+                iter_tier=$(plan_item_tier) || iter_tier=""
+                iter_model=$(resolve_tier_model "$iter_tier" "$model")
+                build_backend_cmd "$iter_model"
+            fi
+
             if [[ -n "$next_item" ]]; then
-                truncate_line "Next:    $next_item" "$line_width"
+                if $tiering_enabled; then
+                    truncate_line "Next:    [$iter_model] $next_item" "$line_width"
+                else
+                    truncate_line "Next:    $next_item" "$line_width"
+                fi
                 echo ""
             fi
         fi
@@ -1168,6 +1418,11 @@ cmd_loop() {
                 local stderr_capture
                 stderr_capture=$(mktemp)
 
+                # With --stream, stdout is teed through format_stream so the
+                # iteration can be watched live; the full text is still captured
+                # for jq and the metrics stream file. The tee writes to the
+                # formatter's stdin on fd 3 (pointing at the terminal) rather
+                # than to stdout, which command substitution is capturing.
                 if [[ "$BACKEND_STDIN_PROMPT" == "true" ]]; then
                     backend_output=$(echo "$prompt" | "${BACKEND_CMD[@]}" 2> >(
                         if $verbose; then
@@ -1177,7 +1432,7 @@ cmd_loop() {
                         else
                             tee "$stderr_capture" >&2
                         fi
-                    )) || backend_exit=$?
+                    ) | if $stream_live; then tee >(format_stream >&3); else cat; fi) || backend_exit=$?
                 else
                     backend_output=$("${BACKEND_CMD[@]}" "$prompt" 2> >(
                         if $verbose; then
@@ -1187,7 +1442,7 @@ cmd_loop() {
                         else
                             tee "$stderr_capture" >&2
                         fi
-                    )) || backend_exit=$?
+                    ) | if $stream_live; then tee >(format_stream >&3); else cat; fi) || backend_exit=$?
                 fi
 
                 local backend_stderr
@@ -1274,7 +1529,7 @@ cmd_loop() {
                 printf '%s\n' "$backend_output" > "$raw_file" 2>/dev/null || true
                 head_after_m=$(git rev-parse HEAD 2>/dev/null) || head_after_m=$head_before
                 if write_iteration_metrics "$metrics_file" "$raw_file" "$mode" \
-                    "$current_branch" "$BACKEND_NAME" "$model" "$iteration" \
+                    "$current_branch" "$BACKEND_NAME" "$iter_model" "$iteration" \
                     "$iter_start" "$iter_end" "$head_before" "$head_after_m" \
                     "$plan_done_before"; then
                     echo ""

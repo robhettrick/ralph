@@ -47,15 +47,35 @@ Keep items **fine-grained** — the build loop implements one item per iteration
 One line per item, in priority order, and nothing else:
 
 ```markdown
-- [ ] **Short imperative title** — one-line description of the outcome. → [NNN-short-slug.md](plan/NNN-short-slug.md)
+- [ ] (heavy) **Short imperative title** — one-line description of the outcome. → [NNN-short-slug.md](plan/NNN-short-slug.md)
 ```
 
 - Mark items complete (`- [x]`) or incomplete (`- [ ]`) to match the `**Status:**` in their task file
+- Give every entry a tier — `(light)` or `(heavy)`, immediately after the checkbox (see below)
 - **No detail in the index.** Scope, file lists, and verification criteria belong in the task file — the index is a queue, and every iteration re-reads it in full
 - **Never delete completed entries or their task files** — the plan is an append-only ledger that preserves what has already shipped
 - If you authored new specs, add tasks (index entry + task file) to implement them
 
 Create `plan/` if it does not already exist.
+
+### Tiers
+
+The build loop reads each entry's tier and picks that iteration's model from it,
+so items needing less reasoning run on a cheaper, faster model. The tier goes on
+the **index line**, not in the task file — the loop chooses the model before it
+opens the task file. Use **only** these values, never a model name, since the
+same plan is run by different backends:
+
+- **light** — implements an established pattern already present in the codebase, specs are clear and complete, and changes are localised to one or two modules. Typical: another endpoint alongside existing ones, a validation rule matching its neighbours, adding test cases to an existing suite.
+- **heavy** — cross-cutting refactors, reconciling inconsistent or incomplete specs, debugging failures whose cause is not yet known, or introducing a pattern the codebase does not have yet.
+
+Judge the tier from the work the item actually requires, not its size — a
+one-line change in code nobody understands yet is `heavy`. **Default to `heavy`
+when genuinely unsure:** a wrong `light` costs a failed or half-finished
+iteration, which is far more expensive than the tokens it saved.
+
+When re-planning, re-tier any entry whose task file's completion notes report
+that it was harder than its tier suggested.
 
 ---
 

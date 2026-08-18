@@ -46,6 +46,16 @@ Ralph is a single Bash script (`ralph`) with these commands:
 5. Pipe prompt to the backend command in a loop (e.g., `claude -p` or `codex exec`)
 6. Parse JSON output with jq using backend-specific flags and filters, push changes after each iteration
 
+In `build` mode, each iteration re-reads `IMPLEMENTATION_PLAN.md` to resolve the
+next entry's tier marker — `(light)`/`(heavy)`, written just after the checkbox —
+through the backend's `BACKEND_TIER_MODELS` map, and rebuilds `BACKEND_CMD` for
+that model, so cheap items run on cheap models. The marker lives on the index
+line rather than in the task file so the loop picks the model without opening
+`plan/NNN-*.md`. Resolution order is `-m` flag → entry tier →
+`BACKEND_DEFAULT_MODEL`; tiering switches off entirely when `-m` is passed, the
+mode isn't `build`, or no entry carries a marker. Unknown tiers warn and fall
+back rather than aborting a long run.
+
 ### Sandbox
 
 Uses the `devcontainer` CLI to manage container lifecycle. Key details:
@@ -82,7 +92,7 @@ Override with `RALPH_BIN_DIR` and `RALPH_CONFIG_DIR`.
 
 - All code lives in the single `ralph` script — no external shell libraries
 - Functions are named `cmd_<command>` for top-level commands
-- Backend definitions use `backend_<name>` functions that set well-known variables (`BACKEND_CLI`, `BACKEND_DEFAULT_MODEL`, etc.) and define a `build_backend_cmd` inner function — adding a new backend only requires a new function and a `SUPPORTED_BACKENDS` entry
+- Backend definitions use `backend_<name>` functions that set well-known variables (`BACKEND_CLI`, `BACKEND_DEFAULT_MODEL`, `BACKEND_TIER_MODELS`, `BACKEND_STREAMS_EVENTS`, etc.) and define a `build_backend_cmd` inner function — adding a new backend only requires a new function and a `SUPPORTED_BACKENDS` entry. `BACKEND_TIER_MODELS` must cover every `SUPPORTED_TIERS` key; `BACKEND_STREAMS_EVENTS` declares whether the backend emits per-event JSON, which is what `--stream`'s live log renders
 - Use `command -v` to check for CLI dependencies
 - Validate early, fail with clear error messages to stderr
 - Cross-platform: support both Linux (`md5sum`) and macOS (`md5`) where needed

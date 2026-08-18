@@ -12,7 +12,7 @@ implement.
 One bullet per item, on a single line, under `## Items` below:
 
 ```markdown
-  - [ ] **Short imperative title** — one-line description of the outcome. → [NNN-short-slug.md](plan/NNN-short-slug.md)
+  - [ ] (heavy) **Short imperative title** — one-line description of the outcome. → [NNN-short-slug.md](plan/NNN-short-slug.md)
 ```
 
 (The example is indented so it isn't mistaken for a real entry — actual entries
@@ -21,6 +21,10 @@ start at column 0.)
 `NNN` is a zero-padded sequence number, allocated in order and never reused. The
 link target must be the item's task file. Use `- [ ]` for incomplete and `- [x]`
 for complete, matching the `**Status:**` in the task file.
+
+`(light)` / `(heavy)` is the item's **tier** (see below). It sits on the index
+line, not in the task file, so the loop can pick the model for the iteration
+without opening the task file first.
 
 ## Task File Format
 
@@ -54,6 +58,21 @@ When the item ships, the build agent flips `**Status:**` to `Done`, writes the
 completion notes here, and flips the index entry to `- [x]`. The notes stay in
 the task file rather than the index, so the queue every iteration re-reads keeps
 to one line per item.
+
+## Tiers
+
+The build loop picks the model for each iteration from that item's tier, so
+cheap work runs on a cheap model. Tiers are abstract, never model names — the
+same plan is run by different backends.
+
+- **light** — follows an established pattern already in the codebase, specs are
+  clear and complete, changes are localised to one or two modules.
+- **heavy** — cross-cutting refactors, reconciling inconsistent specs,
+  debugging failures of unknown cause, or introducing a pattern the codebase
+  does not yet have.
+
+Default to **heavy** when genuinely unsure: a wrong `light` costs a failed or
+half-finished iteration, which is far more expensive than the tokens it saved.
 
 ## Items
 

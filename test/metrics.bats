@@ -176,6 +176,50 @@ MOCK
     [[ "$output" == *"commits 2"* ]]
 }
 
+@test "metrics record the per-iteration tier model, not the run-level one" {
+    "$RALPH" init
+    # The mock ticks the first item each iteration, so iteration 1 takes the
+    # light item and iteration 2 the heavy one.
+    printf -- '- [ ] (light) one\n- [ ] (heavy) two\n' > IMPLEMENTATION_PLAN.md
+    create_committing_backend
+
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 2 --skip-push -y
+    [[ "$status" -eq 0 ]]
+
+    local f
+    f=$(latest_metrics_file)
+    [[ "$(jq -r 'select(.iteration == 1) | .model' "$f")" == "sonnet" ]]
+    [[ "$(jq -r 'select(.iteration == 2) | .model' "$f")" == "opus" ]]
+}
+
+@test "ralph metrics breaks cost down by model on a mixed-model run" {
+    "$RALPH" init
+    printf -- '- [ ] (light) one\n- [ ] (heavy) two\n' > IMPLEMENTATION_PLAN.md
+    create_committing_backend
+
+    PATH="$TEST_DIR/bin:$PATH" "$RALPH" build -n 2 --skip-push -y >/dev/null
+
+    run "$RALPH" metrics "$(latest_metrics_file)"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == *"By model:"* ]]
+    [[ "$output" == *"sonnet: 1 iterations"* ]]
+    [[ "$output" == *"opus: 1 iterations"* ]]
+    # The per-iteration model also appears as its own table column
+    [[ "$output" == *"MODEL"* ]]
+}
+
+@test "ralph metrics omits the by-model breakdown for a single-model run" {
+    "$RALPH" init
+    printf -- '- [ ] one\n- [ ] two\n' > IMPLEMENTATION_PLAN.md
+    create_committing_backend
+
+    PATH="$TEST_DIR/bin:$PATH" "$RALPH" build -n 2 --skip-push -y >/dev/null
+
+    run "$RALPH" metrics "$(latest_metrics_file)"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" != *"By model:"* ]]
+}
+
 @test "ralph metrics with no runs errors helpfully" {
     "$RALPH" init
     run "$RALPH" metrics
