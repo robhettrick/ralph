@@ -15,10 +15,6 @@ ARCHIVE_DIR=".ralph"
 # IMPLEMENTATION_PLAN.md is an index of one-line entries; the detail for each
 # item lives in its own file under TASK_DIR, linked from its index entry.
 TASK_DIR="plan"
-# Task filenames follow NNN-slug.md. clean/archive match this pattern rather
-# than globbing TASK_DIR/* so they never touch files ralph did not create — the
-# directory may well have existed in the project before ralph did.
-TASK_GLOB="[0-9][0-9][0-9]-*.md"
 
 # Rate-limit / usage-limit retry defaults (see cmd_loop's retry wrapper).
 # This caps retries of a single iteration that keeps hitting a token/usage
@@ -209,10 +205,10 @@ cmd_version() {
     exit 0
 }
 
-# True when TASK_DIR holds at least one file matching the NNN-slug.md convention.
+# True when TASK_DIR holds at least one task file.
 has_task_files() {
     local task
-    for task in "$TASK_DIR"/$TASK_GLOB; do
+    for task in "$TASK_DIR"/*.md; do
         if [[ -f "$task" ]]; then
             return 0
         fi
@@ -232,14 +228,13 @@ cmd_clean() {
     done
 
     local task
-    for task in "$TASK_DIR"/$TASK_GLOB; do
+    for task in "$TASK_DIR"/*.md; do
         [[ -f "$task" ]] || continue
         rm "$task"
         echo "Deleted: $task"
         found=true
     done
-    # The directory itself stays — like specs/, it is workspace scaffolding, and
-    # it may hold files ralph did not create.
+    # The directory itself stays — like specs/, it is workspace scaffolding.
 
     $found || echo "Nothing to clean."
 }
@@ -277,7 +272,7 @@ cmd_archive() {
     done
 
     local task
-    for task in "$TASK_DIR"/$TASK_GLOB; do
+    for task in "$TASK_DIR"/*.md; do
         [[ -f "$task" ]] || continue
         mkdir -p "$dest/$TASK_DIR"
         mv "$task" "$dest/$TASK_DIR/"

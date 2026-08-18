@@ -44,7 +44,7 @@ Keep items **fine-grained** — the build loop implements one item per iteration
 
 **2. `IMPLEMENTATION_PLAN.md` — the index**
 
-One line per item, in priority order, and nothing else:
+Under the existing `## Items` heading, keep one line per item, in priority order, and no item detail:
 
 ```markdown
 - [ ] **Short imperative title** — one-line description of the outcome. → [NNN-short-slug.md](plan/NNN-short-slug.md)

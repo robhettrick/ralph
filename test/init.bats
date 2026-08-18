@@ -28,7 +28,7 @@ load test_helper
     [[ -d "plan" ]]
 }
 
-@test "init adopts an existing plan/ directory without touching its contents" {
+@test "init does not recreate or overwrite an existing plan/ directory" {
     mkdir -p plan
     echo "# mine" > plan/notes.md
     run "$RALPH" init
