@@ -9,6 +9,8 @@ implement.
 
 ## Entry Format
 
+This file holds three sections: this title, `## Entry Format`, and `## Items`. Never add another heading.
+
 One bullet per item, on a single line, under `## Items` below:
 
 ```markdown
@@ -19,51 +21,32 @@ One bullet per item, on a single line, under `## Items` below:
 start at column 0.)
 
 `NNN` is a zero-padded sequence number, allocated in order and never reused. The
-link target must be the item's task file. Use `- [ ]` for incomplete and `- [x]`
-for complete, matching the `**Status:**` in the task file.
+link target must be the item's task file.
 
-`(light)` / `(heavy)` is the item's **tier** (see below). It sits on the index
-line, not in the task file, so the loop can pick the model for the iteration
-without opening the task file first.
+### Index rules
 
-## Task File Format
+- Order is priority. The build agent picks the top incomplete item.
+- Write at most 10 words per title. Write one line per entry.
+- The index carries the tier, the title, the outcome and the link. Nothing else.
+- Record no rationale, no evidence, no history, and no status. The task file and `PROGRESS.md` hold those.
 
-Each `plan/NNN-short-slug.md` holds the detail for exactly one item:
+Markers, matching the `**Status:**` in the task file:
 
-````markdown
-# NNN. Short imperative title
+- `- [ ]` open
+- `- [x]` shipped
+- `- [~]` superseded or blocked; never delete it — add a replacement item instead
 
-**Status:** Not started
+Anchor every marker at column zero. Never nest one item under another.
 
-## Scope
+### Tiers
 
-What is included, and what is explicitly excluded (1-2 sentences).
+`(light)` / `(heavy)` sits immediately after the checkbox and states how much
+reasoning the item needs. The build loop picks that iteration's model from it,
+so cheap work runs on a cheap model. It lives on the index line rather than in
+the task file because the loop chooses the model before it opens the task file.
 
-## Files
-
-`path/to/key/file`, `path/to/other/file` (optional — omit when obvious)
-
-## Done when
-
-Concrete verification criteria, referencing runnable commands where possible.
-
-## Completion notes
-
-_Filled in when the item ships: what shipped, test counts, and any deviation
-with its tracking reference. Keep it to a few lines — the narrative belongs in
-`PROGRESS.md`._
-````
-
-When the item ships, the build agent flips `**Status:**` to `Done`, writes the
-completion notes here, and flips the index entry to `- [x]`. The notes stay in
-the task file rather than the index, so the queue every iteration re-reads keeps
-to one line per item.
-
-## Tiers
-
-The build loop picks the model for each iteration from that item's tier, so
-cheap work runs on a cheap model. Tiers are abstract, never model names — the
-same plan is run by different backends.
+Tiers are abstract, never model names — the same plan is run by different
+backends, each mapping the tier into its own catalogue.
 
 - **light** — follows an established pattern already in the codebase, specs are
   clear and complete, changes are localised to one or two modules.
@@ -73,6 +56,62 @@ same plan is run by different backends.
 
 Default to **heavy** when genuinely unsure: a wrong `light` costs a failed or
 half-finished iteration, which is far more expensive than the tokens it saved.
+An entry with no tier falls back to the run's default model.
+
+### Task files
+
+Each `plan/NNN-short-slug.md` holds the detail for exactly one item, in these
+fields, in this order, and no others:
+
+````markdown
+# NNN. Short imperative title
+
+**Status:** Not started
+
+## Spec
+
+`specs/file.md` item N
+
+## Scope
+
+What is included. What is excluded.
+
+## Files
+
+`path/to/file`, `path/to/other`
+
+## Steps
+
+1. Imperative technical instruction.
+2. Imperative technical instruction.
+
+## Done when
+
+Criterion the agent can check without a human.
+
+## Completion notes
+
+_Filled in when the item ships: what shipped, test counts, and any deviation
+with its tracking reference. Keep it to a few lines — the narrative belongs in
+`PROGRESS.md`._
+````
+
+Task file rules:
+
+- The spec states what to build. The task file states how to build it.
+- Cite a spec file plus an item number or a section name in `Spec`.
+- Write at most 150 words per task file, excluding the completion notes.
+- Write at most 2 sentences for `Scope`. Write at most 2 sentences for `Done when`.
+- Write at most 8 steps. Write one action per step. Write at most 20 words per step.
+- Split any item that needs a ninth step. That item is too large for one iteration.
+- Name symbols, option paths, literal values, and files to copy an idiom from.
+- Never cite line numbers. Never paste code. Every named token must be greppable.
+- List paths only in `Files`.
+- Write every field in Simplified Technical English. Use active voice and present tense.
+
+When the item ships, the build agent flips `**Status:**` to `Done`, writes the
+completion notes here, and flips the index entry to `- [x]`. The notes stay in
+the task file rather than the index, so the queue every iteration re-reads keeps
+to one line per item.
 
 ## Items
-

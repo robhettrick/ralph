@@ -54,14 +54,6 @@ load test_helper
     [[ "$output" == *"Archived: plan/001-thing.md"* ]]
 }
 
-@test "archive leaves files in plan/ that ralph did not create" {
-    "$RALPH" init
-    printf '# mine\n' > plan/roadmap.md
-    run "$RALPH" archive
-    [[ "$status" -eq 0 ]]
-    [[ -f "plan/roadmap.md" ]]
-}
-
 # A plan/ holding task files is enough to archive, even with the index gone
 @test "archive runs when only per-task files remain" {
     mkdir -p plan

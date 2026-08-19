@@ -241,3 +241,51 @@ load test_helper
     [[ "$status" -eq 0 ]]
     [[ "$(grep -c -- '--model sonnet' <<<"$output")" -eq 2 ]]
 }
+
+# --- Interaction with the plan's section scoping ---
+
+# Tier resolution reads through plan_items_body, like next_plan_item and the
+# item count. Without that, a checkbox in the prose above '## Items' — the
+# template's own tiered exemplar, or an example an agent pasted back at column
+# zero — would choose the model for the iteration.
+@test "a tier marker above the Items heading does not set the model" {
+    "$RALPH" init
+    awk '/^## Items[[:space:]]*$/ && !d { print "- [ ] (light) **Decoy above Items**"; print ""; d = 1 } { print }' \
+        IMPLEMENTATION_PLAN.md > IMPLEMENTATION_PLAN.md.tmp
+    mv -f IMPLEMENTATION_PLAN.md.tmp IMPLEMENTATION_PLAN.md
+    printf -- '- [ ] (heavy) **Real item** — x. → [001-a.md](plan/001-a.md)\n' >> IMPLEMENTATION_PLAN.md
+
+    run "$RALPH" build --dry-run -n 1
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == *"Next:    [opus] Real item"* ]]
+    [[ "$output" == *"--model opus"* ]]
+    [[ "$output" != *"--model sonnet"* ]]
+}
+
+# The scaffolded template carries a tiered exemplar under '## Entry Format'.
+# It must not make an otherwise untiered plan look tier-aware.
+@test "the template's exemplar does not make an untiered plan report tiers" {
+    "$RALPH" init
+    printf -- '- [ ] **Untiered item** — x. → [001-a.md](plan/001-a.md)\n' >> IMPLEMENTATION_PLAN.md
+
+    run "$RALPH" build --dry-run -n 1
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == *"Model:   opus"* ]]
+    [[ "$output" != *"Model:   per item"* ]]
+}
+
+# Markers merged in from main: neither shipped nor blocked entries may supply
+# the tier, since neither is the item the iteration will attempt.
+@test "shipped and blocked entries do not supply the tier" {
+    "$RALPH" init
+    {
+        printf -- '- [x] (light) **Shipped** — done. → [001-a.md](plan/001-a.md)\n'
+        printf -- '- [~] (light) **Blocked** — superseded. → [002-b.md](plan/002-b.md)\n'
+        printf -- '- [ ] (heavy) **Real item** — x. → [003-c.md](plan/003-c.md)\n'
+    } >> IMPLEMENTATION_PLAN.md
+
+    run "$RALPH" build --dry-run -n 1
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == *"Next:    [opus] Real item"* ]]
+    [[ "$output" != *"--model sonnet"* ]]
+}
