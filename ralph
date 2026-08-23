@@ -4,13 +4,18 @@ set -euo pipefail
 VERSION="0.1.0"
 CONFIG_DIR="${RALPH_CONFIG_DIR:-$HOME/.config/ralph}"
 
-# Default cap for plan mode (build mode calculates from the plan)
-PLAN_DEFAULT_CAP=3
+# Safety-net cap for plan mode; a plan run normally ends on convergence,
+# well before this (build mode calculates its own count from the plan)
+PLAN_DEFAULT_CAP=6
 # Review is a single read-only pass by default; use -n to run more
 REVIEW_DEFAULT_CAP=1
 
 ARTIFACTS=(IMPLEMENTATION_PLAN.md PROGRESS.md REVIEW.md PROMPT_plan.md PROMPT_build.md PROMPT_review.md)
 ARCHIVE_DIR=".ralph"
+
+# IMPLEMENTATION_PLAN.md is an index of one-line entries; the detail for each
+# item lives in its own file under TASK_DIR, linked from its index entry.
+TASK_DIR="plan"
 
 # Rate-limit / usage-limit retry defaults (see cmd_loop's retry wrapper).
 # This caps retries of a single iteration that keeps hitting a token/usage
@@ -106,6 +111,30 @@ backend_pi() {
     }
 }
 
+# --- Utilities ---
+
+# Hash stdin. Linux ships md5sum, macOS ships md5.
+md5_hash() {
+    if command -v md5sum &>/dev/null; then
+        md5sum | cut -d' ' -f1
+    elif command -v md5 &>/dev/null; then
+        md5
+    else
+        echo "Error: no md5sum or md5 command found — install coreutils" >&2
+        return 1
+    fi
+}
+
+# Fail clearly when an option that takes a value is given none at all.
+# A value that merely looks like a flag is left alone: the option's own
+# validation reports it better than a generic parser message would.
+require_option_value() {
+    if [[ $# -lt 2 ]]; then
+        echo "Error: option '$1' requires a value" >&2
+        exit 1
+    fi
+}
+
 resolve_backend() {
     local name="$1"
     local found=false
@@ -141,11 +170,14 @@ Modes:
   sandbox        Enter a devcontainer shell for the current project
   sandbox clean  Remove the devcontainer for the current project
   plan           Analyse specs and source, create/update IMPLEMENTATION_PLAN.md
+                 and the per-task files it links to under plan/
   build          Pick the next item, implement, test, commit, push
   review         Review the branch diff against specs, write REVIEW.md (changes nothing else)
-  init           Initialise workspace (PROGRESS.md, IMPLEMENTATION_PLAN.md, specs/)
-  clean          Delete IMPLEMENTATION_PLAN.md and PROGRESS.md
-  archive        Move IMPLEMENTATION_PLAN.md and PROGRESS.md to .ralph/<timestamp>/
+  init           Initialise workspace (PROGRESS.md, IMPLEMENTATION_PLAN.md,
+                 specs/, plan/)
+  clean          Delete IMPLEMENTATION_PLAN.md, PROGRESS.md and plan/ task files
+  archive        Move IMPLEMENTATION_PLAN.md, PROGRESS.md and plan/ task files
+                 to .ralph/<timestamp>/
   metrics        Summarise a run's loop metrics (latest run, or a given metrics.jsonl)
 
 Sandbox options:
@@ -155,9 +187,16 @@ Sandbox options:
 
 Init options:
   -p, --prompts      Also copy prompt templates for local customisation
+      --gitignore    Also add the loop artifacts (IMPLEMENTATION_PLAN.md,
+                     PROGRESS.md, REVIEW.md, plan/, .ralph/) to .gitignore.
+                     Off by default — whether the plan is loop-local state or a
+                     committed audit trail is the project's call
 
 Options:
-  -n, --iterations N   Max iterations (plan default: 3, build default: from plan, review default: 1)
+  -n, --iterations N   Max iterations (plan default: 6, build: calculated from
+                       the plan, review default: 1). In build mode this also
+                       disables the noop exit; in plan mode it caps the run but
+                       never disables the convergence exit
   -g, --goal TEXT      Goal to inject into the prompt template
   -m, --model MODEL    Model to use (default depends on backend)
   -b, --backend NAME   Backend to use: claude, codex, copilot, pi (default: claude)
@@ -198,6 +237,17 @@ cmd_version() {
     exit 0
 }
 
+# True when TASK_DIR holds at least one task file.
+has_task_files() {
+    local task
+    for task in "$TASK_DIR"/*.md; do
+        if [[ -f "$task" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 cmd_clean() {
     local found=false
     for file in "${ARTIFACTS[@]}"; do
@@ -208,6 +258,16 @@ cmd_clean() {
             found=true
         fi
     done
+
+    local task
+    for task in "$TASK_DIR"/*.md; do
+        [[ -f "$task" ]] || continue
+        rm "$task"
+        echo "Deleted: $task"
+        found=true
+    done
+    # The directory itself stays — like specs/, it is workspace scaffolding.
+
     $found || echo "Nothing to clean."
 }
 
@@ -220,6 +280,10 @@ cmd_archive() {
             break
         fi
     done
+
+    if ! $found && has_task_files; then
+        found=true
+    fi
 
     if ! $found; then
         echo "Nothing to archive."
@@ -238,14 +302,24 @@ cmd_archive() {
             echo "Archived: $file -> $dest/$file"
         fi
     done
+
+    local task
+    for task in "$TASK_DIR"/*.md; do
+        [[ -f "$task" ]] || continue
+        mkdir -p "$dest/$TASK_DIR"
+        mv "$task" "$dest/$TASK_DIR/"
+        echo "Archived: $task -> $dest/$task"
+    done
 }
 
 cmd_init() {
     local with_prompts=false
+    local with_gitignore=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -p|--prompts) with_prompts=true; shift ;;
+            -p|--prompts)   with_prompts=true; shift ;;
+            --gitignore)    with_gitignore=true; shift ;;
             *) echo "Error: unknown init option '$1'"; exit 1 ;;
         esac
     done
@@ -272,6 +346,14 @@ cmd_init() {
         echo "Created: specs/"
     fi
 
+    # Per-task detail files linked from IMPLEMENTATION_PLAN.md's index entries.
+    if [[ -d "$TASK_DIR" ]]; then
+        echo "Skipped: $TASK_DIR/ already exists"
+    else
+        mkdir -p "$TASK_DIR"
+        echo "Created: $TASK_DIR/"
+    fi
+
     # Bundled Claude Code skills (e.g. /commit) — scaffold into project-local .claude/skills/
     local skills_dir="$CONFIG_DIR/skills"
     if [[ -f "$skills_dir/commit/SKILL.md" ]]; then
@@ -281,20 +363,9 @@ cmd_init() {
         echo "Warning: commit skill not found at $skills_dir/commit/SKILL.md"
     fi
 
-    # Add ralph artifacts to .gitignore
-    if [[ ! -f ".gitignore" ]]; then
-        touch .gitignore
-        echo "Created: .gitignore"
+    if $with_gitignore; then
+        gitignore_artifacts
     fi
-    # Ensure file ends with a newline before appending
-    [[ -s .gitignore && $(tail -c1 .gitignore) != "" ]] && echo >> .gitignore
-    local ignore_entries=("IMPLEMENTATION_PLAN.md" "PROGRESS.md" "REVIEW.md" ".ralph/" "PROMPT_plan.md" "PROMPT_build.md" "PROMPT_review.md")
-    for entry in "${ignore_entries[@]}"; do
-        if ! grep -qxF "$entry" .gitignore; then
-            echo "$entry" >> .gitignore
-            echo "Added to .gitignore: $entry"
-        fi
-    done
 
     # Optional: copy prompt templates for local customisation
     if $with_prompts; then
@@ -308,6 +379,34 @@ cmd_init() {
             scaffold "PROMPT_${file}" "$prompts_dir/$file"
         done
     fi
+}
+
+gitignore_artifacts() {
+    local entries=("IMPLEMENTATION_PLAN.md" "PROGRESS.md" "REVIEW.md" "$TASK_DIR/" ".ralph/")
+
+    local missing=() entry
+    for entry in "${entries[@]}"; do
+        grep -qxF "$entry" .gitignore 2>/dev/null || missing+=("$entry")
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo "Skipped: .gitignore already ignores the loop artifacts"
+        return
+    fi
+
+    if [[ ! -f ".gitignore" ]]; then
+        touch .gitignore
+        echo "Created: .gitignore"
+    fi
+    # Ensure the file ends with a newline before appending
+    [[ -s .gitignore && $(tail -c1 .gitignore) != "" ]] && echo >> .gitignore
+    [[ -s .gitignore ]] && printf '\n' >> .gitignore
+
+    echo "# Ralph loop artifacts" >> .gitignore
+    for entry in "${missing[@]}"; do
+        echo "$entry" >> .gitignore
+        echo "Added to .gitignore: $entry"
+    done
 }
 
 scaffold() {
@@ -458,14 +557,7 @@ cmd_sandbox() {
 
     # Shell history volume (deterministic per workspace)
     local workspace_hash
-    if command -v md5sum &>/dev/null; then
-        workspace_hash=$(echo -n "$PWD" | md5sum | cut -c1-12)
-    elif command -v md5 &>/dev/null; then
-        workspace_hash=$(echo -n "$PWD" | md5 | cut -c1-12)
-    else
-        echo "Error: no md5sum or md5 command found — install coreutils" >&2
-        return 1
-    fi
+    workspace_hash=$(echo -n "$PWD" | md5_hash | cut -c1-12) || return 1
     mounts+=("type=volume,source=ralph-history-${workspace_hash},target=/commandhistory")
 
     local mount_flags=()
@@ -586,12 +678,31 @@ require_init_artifacts() {
     fi
 }
 
+# The part of the plan that holds real items — everything below '## Items'.
+#
+# The scaffolded '## Entry Format' section documents the entry shape by example.
+# This template indents its exemplar so it does not match '^- \[', but that is a
+# property of the template's formatting, not a guarantee: a reworded header, a
+# hand-written plan, or an agent pasting an example back at column zero would
+# each put a checkbox above '## Items'. Scoping the read to the items section
+# means counting never depends on how the prose above it happens to be laid out.
+#
+# Plans without the heading are read whole, so older and hand-written plans work.
+plan_items_body() {
+    local file="IMPLEMENTATION_PLAN.md"
+    if grep -qE '^## Items[[:space:]]*$' "$file" 2>/dev/null; then
+        sed -n '/^## Items[[:space:]]*$/,$p' "$file"
+    else
+        cat "$file"
+    fi
+}
+
 # Calculate build iterations from IMPLEMENTATION_PLAN.md.
 # Counts incomplete items (- [ ]) and adds 20% headroom (rounded up, minimum 1).
 # Caller must ensure IMPLEMENTATION_PLAN.md exists (see require_init_artifacts).
 calculate_build_iterations() {
     local count
-    count=$(grep -c '^\- \[ \]' "IMPLEMENTATION_PLAN.md" || true)
+    count=$(plan_items_body | grep -c '^- \[ \]' || true)
 
     if [[ "$count" -eq 0 ]]; then
         echo "Error: no incomplete items in IMPLEMENTATION_PLAN.md. Run 'ralph plan' first." >&2
@@ -600,6 +711,58 @@ calculate_build_iterations() {
 
     # 20% headroom, rounded up: ceil(count * 1.2)
     echo $(( (count * 6 + 4) / 5 ))
+}
+
+# Fingerprint the artifacts a plan iteration is allowed to change.
+# Plan mode never commits (IMPLEMENTATION_PLAN.md is gitignored), so HEAD cannot
+# detect progress. A pass that leaves this hash unchanged has converged.
+#
+# TASK_DIR is hashed alongside the index: the index is one line per item, so a
+# pass that only rewrites an item's scope or verification criteria changes a
+# task file and nothing else. Hashing the index alone would read that as
+# convergence and stop the run mid-plan.
+plan_state_hash() {
+    {
+        if [[ -f "IMPLEMENTATION_PLAN.md" ]]; then
+            cat "IMPLEMENTATION_PLAN.md"
+        fi
+        if [[ -d "$TASK_DIR" ]]; then
+            # Names as well as contents, so adding or removing a task file counts.
+            find -L "$TASK_DIR" -type f -name '*.md' | LC_ALL=C sort | while IFS= read -r task; do
+                echo "$task"
+                cat -- "$task" || true
+            done
+        fi
+        if [[ -d "specs" ]]; then
+            # Hash names as well as contents so adding or removing a spec counts
+            # as a change. LC_ALL=C keeps the order stable across platforms.
+            # -L follows symlinked specs; an unreadable one must not abort the run.
+            find -L specs -type f | LC_ALL=C sort | while IFS= read -r spec; do
+                echo "$spec"
+                cat -- "$spec" || true
+            done
+        fi
+    } 2>/dev/null | md5_hash
+}
+
+# Paths a build iteration changed, excluding the loop's own bookkeeping.
+#
+# A build iteration always rewrites IMPLEMENTATION_PLAN.md and PROGRESS.md, and
+# `ralph init` no longer gitignores them, so a project that commits its artifacts
+# advances HEAD every pass. A bare HEAD comparison would then read a stalled loop
+# as progress and never exit early. Ask the narrower question instead: did this
+# iteration change anything other than the plan and the log?
+#
+# Empty output means no source progress, whether or not HEAD moved.
+build_progress_paths() {
+    local before="$1" after="$2"
+    [[ "$before" == "$after" ]] && return 0
+    git diff --name-only "$before" "$after" -- . \
+        ":(exclude)IMPLEMENTATION_PLAN.md" \
+        ":(exclude)PROGRESS.md" \
+        ":(exclude)REVIEW.md" \
+        ":(exclude)${TASK_DIR}/" \
+        ":(exclude).ralph/"
 }
 
 truncate_line() {
@@ -680,15 +843,21 @@ format_duration() {
 }
 
 # First incomplete item in IMPLEMENTATION_PLAN.md, stripped of the checkbox
-# prefix and markdown emphasis — the item the build prompt directs the agent
-# to pick next. Empty when the file is absent or every item is complete.
+# prefix, markdown emphasis, and the trailing link to its task file — the item
+# the build prompt directs the agent to pick next. Empty when the file is absent
+# or every item is complete.
 #
 # Done in a single sed that quits at the first match rather than piping into
 # head: under `set -o pipefail` a head that closes the pipe early makes the
 # whole pipeline non-zero, which would abort the loop on a long plan.
 next_plan_item() {
-    sed -nE '/^- \[ \]/{ s/^- \[ \] *//; s/\*\*//g; p; q; }' \
-        IMPLEMENTATION_PLAN.md 2>/dev/null
+    plan_items_body 2>/dev/null | sed -nE '/^- \[ \]/{
+        s/^- \[ \] *//
+        s/\*\*//g
+        s/[[:space:]]*(→|->)?[[:space:]]*\[[^]]*\]\([^)]*\)[[:space:]]*$//
+        p
+        q
+    }'
 }
 
 # --- Metrics capture ---
@@ -721,6 +890,7 @@ iso_utc() {
 write_iteration_metrics() {
     local metrics_file="$1" raw_file="$2" mode="$3" branch="$4" backend="$5" model="$6"
     local iteration="$7" started="$8" ended="$9" head_before="${10}" head_after="${11}" plan_done_before="${12}"
+    local plan_noop="${13:-}"
 
     local commits=0 stat="" files="" ins="" del="" noop=true
     if [[ "$head_before" != "$head_after" ]]; then
@@ -733,9 +903,15 @@ write_iteration_metrics() {
     fi
     files=${files:-0}; ins=${ins:-0}; del=${del:-0}
 
+    # Plan iterations never commit, so HEAD cannot describe them. The caller
+    # passes a verdict derived from the plan artifacts instead.
+    if [[ -n "$plan_noop" ]]; then
+        noop=$plan_noop
+    fi
+
     local plan_done_after=0 plan_delta=0
     if [[ -f "IMPLEMENTATION_PLAN.md" ]]; then
-        plan_done_after=$(grep -c '^\- \[x\]' "IMPLEMENTATION_PLAN.md" || true)
+        plan_done_after=$(plan_items_body | grep -c '^- \[x\]' || true)
     fi
     plan_delta=$(( plan_done_after - plan_done_before ))
     (( plan_delta < 0 )) && plan_delta=0
@@ -874,24 +1050,38 @@ cmd_loop() {
     local no_retry=false
     local no_metrics=false
 
-    ARGS=$(getopt -o n:g:m:b:vyh --long iterations:,goal:,model:,backend:,skip-push,dry-run,no-metrics,verbose,yes,help,max-retries-per-iteration:,no-retry -n 'ralph' -- "$@")
-    eval set -- "$ARGS"
-
-    while true; do
+    # Parsed by hand rather than with getopt(1). BSD getopt, which is what macOS
+    # ships, does not understand --long and returns the whole invocation as
+    # positional junk — every flag was then silently dropped, so --dry-run ran
+    # the backend for real and --skip-push pushed. cmd_sandbox already parses its
+    # own flags this way. The mode is shifted off above, so there are no
+    # positionals left to permute and getopt bought only the --opt=value form,
+    # which the first branch handles.
+    while [[ $# -gt 0 ]]; do
         case "$1" in
-            -n|--iterations) max_iterations="$2"; shift 2 ;;
-            -g|--goal)       goal="$2";           shift 2 ;;
-            -m|--model)      model="$2";          shift 2 ;;
-            -b|--backend)    backend="$2";        shift 2 ;;
+            --*=*)
+                # Normalise --opt=value into --opt value, then re-dispatch
+                set -- "${1%%=*}" "${1#*=}" "${@:2}"
+                continue
+                ;;
+            -n|--iterations)             require_option_value "$@"; max_iterations="$2";  shift 2 ;;
+            -g|--goal)                   require_option_value "$@"; goal="$2";            shift 2 ;;
+            -m|--model)                  require_option_value "$@"; model="$2";           shift 2 ;;
+            -b|--backend)                require_option_value "$@"; backend="$2";         shift 2 ;;
+            --max-retries-per-iteration) require_option_value "$@"; max_retries_opt="$2"; shift 2 ;;
             --skip-push)     skip_push=true;      shift ;;
             --dry-run)       dry_run=true;        shift ;;
             --no-metrics)    no_metrics=true;     shift ;;
+            --no-retry)      no_retry=true;       shift ;;
             -v|--verbose)    verbose=true;        shift ;;
             -y|--yes)        assume_yes=true;     shift ;;
-            --max-retries-per-iteration) max_retries_opt="$2"; shift 2 ;;
-            --no-retry)      no_retry=true;       shift ;;
             -h|--help)       usage ;;
             --)              shift; break ;;
+            *)
+                echo "Error: unknown option '$1' for 'ralph $mode'" >&2
+                echo "Run 'ralph --help' for usage." >&2
+                exit 1
+                ;;
         esac
     done
 
@@ -1056,15 +1246,19 @@ cmd_loop() {
             fi
         fi
 
-        # Snapshot HEAD to detect noops
-        local head_before
+        # Snapshot HEAD to detect noops. Plan mode never commits, so it
+        # fingerprints the artifacts it is allowed to change instead.
+        local head_before plan_state_before="" plan_state_after=""
         head_before=$(git rev-parse HEAD)
+        if [[ "$mode" == "plan" ]]; then
+            plan_state_before=$(plan_state_hash)
+        fi
 
         # Snapshot metrics baseline for this iteration
         local iter_start plan_done_before=0
         iter_start=$(date +%s)
         if [[ -f "IMPLEMENTATION_PLAN.md" ]]; then
-            plan_done_before=$(grep -c '^\- \[x\]' "IMPLEMENTATION_PLAN.md" || true)
+            plan_done_before=$(plan_items_body | grep -c '^- \[x\]' || true)
         fi
 
         # Inject {{GOAL}} into prompt using bash substitution
@@ -1203,6 +1397,18 @@ cmd_loop() {
             # Print jq output (unchanged behaviour)
             echo "$jq_output"
 
+            # Fingerprint the plan artifacts after the pass. Plan mode uses this
+            # instead of HEAD for both the metrics noop flag and convergence.
+            local plan_noop=""
+            if [[ "$mode" == "plan" ]]; then
+                plan_state_after=$(plan_state_hash)
+                if [[ "$plan_state_before" == "$plan_state_after" ]]; then
+                    plan_noop=true
+                else
+                    plan_noop=false
+                fi
+            fi
+
             # Record iteration metrics; a failure here warns but never
             # interrupts the loop.
             if $metrics_enabled; then
@@ -1217,7 +1423,7 @@ cmd_loop() {
                 if write_iteration_metrics "$metrics_file" "$raw_file" "$mode" \
                     "$current_branch" "$BACKEND_NAME" "$model" "$iteration" \
                     "$iter_start" "$iter_end" "$head_before" "$head_after_m" \
-                    "$plan_done_before"; then
+                    "$plan_done_before" "$plan_noop"; then
                     echo ""
                     truncate_line "Metrics: $(fmt_duration $((iter_end - iter_start))) wall$(metrics_summary_suffix "$metrics_file")" "$line_width"
                 else
@@ -1249,19 +1455,50 @@ cmd_loop() {
             fi
         fi
 
-        # Noop detection: exit early after 2 consecutive noops (build mode only, unless -n was passed).
-        # Plan mode doesn't produce commits (IMPLEMENTATION_PLAN.md is gitignored), so HEAD never advances.
-        if [[ "$mode" == "build" ]] && ! $hard_override && ! $dry_run; then
-            local head_after
-            head_after=$(git rev-parse HEAD)
-            if [[ "$head_before" == "$head_after" ]]; then
-                consecutive_noops=$((consecutive_noops + 1))
-                if [[ $consecutive_noops -ge 2 ]]; then
-                    echo -e "\nNo changes detected for 2 consecutive iterations — exiting early."
+        # Early exit, per mode.
+        #
+        # Build mode watches HEAD and tolerates one noop; -n overrides it.
+        #
+        # Plan mode never commits (IMPLEMENTATION_PLAN.md is gitignored), so it
+        # watches the plan artifacts instead. A pass that changes nothing has
+        # converged, and there is no second-chance iteration to wait for: -n caps
+        # a plan run but never disables the check.
+        #
+        # Review mode has no early exit at all. It is read-only by design — it
+        # writes REVIEW.md and never commits — so every iteration is a noop by
+        # HEAD, and a HEAD-based check would cut a multi-pass review short for
+        # doing exactly what it is supposed to do. Each condition below names its
+        # mode explicitly rather than treating one as the default.
+        #
+        # Convergence requires at least one item to converge on. A pass that
+        # changes nothing against an empty plan is a planning failure — the
+        # backend answered without doing the work — and is indistinguishable
+        # from real convergence by the fingerprint alone. Failing here stops a
+        # run that would otherwise report success and leave 'ralph build' with
+        # nothing to do.
+        if ! $dry_run; then
+            if [[ "$mode" == "plan" ]]; then
+                if [[ "$plan_state_before" == "$plan_state_after" ]]; then
+                    if [[ "$(plan_items_body | grep -c '^- \[' || true)" -eq 0 ]]; then
+                        echo "Error: pass $iteration changed nothing and IMPLEMENTATION_PLAN.md holds no items." >&2
+                        echo "The planning agent produced no plan. Check the backend output above; re-run 'ralph plan' once the cause is fixed." >&2
+                        exit 1
+                    fi
+                    echo -e "\nPlan converged — pass $iteration changed nothing. Exiting early."
                     break
                 fi
-            else
-                consecutive_noops=0
+            elif [[ "$mode" == "build" ]] && ! $hard_override; then
+                local head_after
+                head_after=$(git rev-parse HEAD)
+                if [[ -z "$(build_progress_paths "$head_before" "$head_after")" ]]; then
+                    consecutive_noops=$((consecutive_noops + 1))
+                    if [[ $consecutive_noops -ge 2 ]]; then
+                        echo -e "\nNo changes detected for 2 consecutive iterations — exiting early."
+                        break
+                    fi
+                else
+                    consecutive_noops=0
+                fi
             fi
         fi
     done
