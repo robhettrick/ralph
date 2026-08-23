@@ -1,0 +1,157 @@
+name: Claude PR review
+
+# Runs when a PR is opened non-draft, marked ready for review, or updated while
+# ready. Drafts are ignored: the loop branch gets reviewed once it is a
+# candidate for main, not on every ralph iteration.
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  # The gate. Loosen here, not in the prompt.
+  MIN_SEVERITY: high        # blocking | high | medium | low
+  MIN_CONFIDENCE: "80"
+  MAX_INLINE_COMMENTS: "10"
+
+jobs:
+  review:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       !endsWith(github.event.pull_request.user.login, '[bot]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so merge-base works
+          ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', inputs.pr_number) }}
+
+      - name: Resolve PR context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr="${{ github.event.pull_request.number || inputs.pr_number }}"
+          base=$(gh pr view "$pr" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)
+          git fetch origin "$base"
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "base=origin/$base" >> "$GITHUB_OUTPUT"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Language toolchain so Claude can actually run tests/lint when verifying.
+      # Adjust per repo; keep it cheap.
+      - name: Install bats
+        run: which bats || sudo apt-get update -qq && sudo apt-get install -y -qq bats
+      - uses: actions/setup-node@v4
+        if: hashFiles('.nvmrc') != ''
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/setup-node@v4
+        if: hashFiles('.nvmrc') == ''
+        with:
+          node-version: lts/*
+      # Discover every npm tree (root and one level down) so the workflow does
+      # not depend on the repository layout; install each so tests can run.
+      - name: Discover trees and install dependencies
+        id: trees
+        run: |
+          trees=$(for f in package.json */package.json; do [ -f "$f" ] && dirname "$f"; done | grep -v node_modules | sort -u | tr '\n' ' ')
+          echo "Trees: $trees"
+          tests=""; lints=""; tools=""
+          for d in $trees; do
+            (cd "$d" && npm ci --ignore-scripts --no-audit --no-fund) || echo "npm ci failed in $d (Claude will note it)"
+            if [ "$d" = "." ]; then p=""; else p="--prefix $d "; fi
+            tests="$tests npm ${p}test ;"
+            lints="$lints npm ${p}run lint ;"
+            tools="$tools,Bash(npm ${p}test:*),Bash(npm ${p}run lint:*)"
+          done
+          echo "list=$trees" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "lints=$lints" >> "$GITHUB_OUTPUT"
+          echo "tools=$tools" >> "$GITHUB_OUTPUT"
+
+      - name: Build prompt
+        run: |
+          mkdir -p .claude-review
+          # Placeholder so the Edit tool has a file to replace; the filter treats
+          # an untouched placeholder as a pipeline error and fails the check.
+          echo '{"schema": 1, "status": "not_written", "findings": []}' > .claude-review/findings.json
+          ctx="Repository: $GITHUB_REPOSITORY
+          PR: #${{ steps.ctx.outputs.pr }}
+          Base ref for diff: ${{ steps.ctx.outputs.base }}
+          HEAD: ${{ steps.ctx.outputs.head }}
+          npm trees in this repo: ${{ steps.trees.outputs.list }}
+          Test commands: ${{ steps.trees.outputs.tests }}
+          Lint commands: ${{ steps.trees.outputs.lints }}
+          Shell test suite: bats test/ (run it; it is the test command for this repo)
+          Only run tests/lint for trees the diff touches. Do not install anything.
+          Minimum severity that will be posted: $MIN_SEVERITY (confidence >= $MIN_CONFIDENCE)"
+          python3 - "$ctx" <<'EOF'
+          import sys, pathlib
+          tpl = pathlib.Path('.github/claude/pr-review-prompt.md').read_text()
+          pathlib.Path('.claude-review/prompt.md').write_text(tpl.replace('{{RUN_CONTEXT}}', sys.argv[1]))
+          EOF
+
+      # Stage A: Claude reads, verifies, writes findings.json. Read-only tools
+      # plus one Write target. No GitHub write tools: Claude cannot post.
+      - name: Claude review (findings only)
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Subscription route: token from `claude setup-token` on Rob's account,
+          # stored as the CLAUDE_CODE_OAUTH_TOKEN secret. Every CI run draws on
+          # that account's weekly limit. To switch to metered billing, replace
+          # this line with: anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            Read the file `.claude-review/prompt.md` and follow it exactly. It is the
+            complete review brief. Your only output is `.claude-review/findings.json`.
+          # Add `--model <id>` here to pin a model; otherwise the action default is used.
+          claude_args: >-
+            --max-turns 80
+            --disallowedTools "WebFetch,WebSearch"
+            --allowedTools "Read,Grep,Glob,Edit(.claude-review/findings.json),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git merge-base:*),Bash(bats:*)${{ steps.trees.outputs.tools }}"
+
+      # Stage B: deterministic gate. No model involved.
+      # Exits non-zero (failing the check) if Claude produced no usable file.
+      - name: Filter findings
+        run: |
+          set +e
+          python3 .github/claude/filter_findings.py .claude-review/findings.json \
+            --out .claude-review/review.json \
+            --summary .claude-review/summary.md \
+            --min-severity "$MIN_SEVERITY" \
+            --min-confidence "$MIN_CONFIDENCE" \
+            --max-comments "$MAX_INLINE_COMMENTS"
+          rc=$?
+          cat .claude-review/summary.md >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Post review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/claude/post_review.sh "$GITHUB_REPOSITORY" "${{ steps.ctx.outputs.pr }}" .claude-review/review.json
+
+      # Everything Claude found, including what was filtered, kept for 14 days.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: claude-review-${{ steps.ctx.outputs.pr }}-${{ github.run_attempt }}
+          path: .claude-review/
+          include-hidden-files: true
+          retention-days: 14
