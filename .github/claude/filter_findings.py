@@ -65,6 +65,7 @@ def classify(f: dict, args) -> tuple[bool, str]:
     sev = str(f.get("severity", "")).lower()
     if sev not in SEVERITY_RANK:
         return False, f"unknown severity {sev!r}"
+    f["severity"] = sev  # normalise in place: dedupe/sort index SEVERITY_RANK by this
     if SEVERITY_RANK[sev] < SEVERITY_RANK[args.min_severity]:
         return False, f"severity {sev} below {args.min_severity}"
     if f.get("verified") is not True:
