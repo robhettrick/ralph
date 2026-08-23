@@ -20,3 +20,8 @@ PROMPT_plan.md
 PROMPT_build.md
 
 .claude/
+
+.claude-review/
+
+# Local Claude/MCP config
+.mcp.json
