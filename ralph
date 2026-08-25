@@ -180,6 +180,8 @@ Modes:
   archive        Move IMPLEMENTATION_PLAN.md, PROGRESS.md, LEARNINGS.md and
                  plan/ task files to .ralph/<timestamp>/
   metrics        Summarise a run's loop metrics (latest run, or a given metrics.jsonl)
+  dashboard      Cross-run metrics dashboard: every run, filterable by branch,
+                 model, mode and run (needs uv)
 
 Sandbox options:
       --rebuild            Rebuild the container image from scratch
@@ -920,9 +922,21 @@ write_iteration_metrics() {
           }' "$raw_file" 2>/dev/null) || backend_summary='{}'
     [[ -z "$backend_summary" ]] && backend_summary='{}'
 
+    # The branch alone does not pin the inputs: record the commit the iteration
+    # started from, and whether the tree was dirty at that point. Both are
+    # best-effort — a non-git checkout yields nulls rather than failing a run.
+    local head_commit tree_dirty
+    head_commit=$(git rev-parse --short "$head_before" 2>/dev/null || true)
+    if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+        tree_dirty=true
+    else
+        tree_dirty=false
+    fi
+
     jq -cn \
         --argjson iteration "$iteration" \
         --arg mode "$mode" --arg branch "$branch" \
+        --arg commit "$head_commit" --argjson dirty "$tree_dirty" \
         --arg backend "$backend" --arg model "$model" \
         --arg started "$(iso_utc "$started")" \
         --arg ended "$(iso_utc "$ended")" \
@@ -931,7 +945,9 @@ write_iteration_metrics() {
         --argjson insertions "$ins" --argjson deletions "$del" \
         --argjson noop "$noop" --argjson plan_done "$plan_delta" \
         --argjson backend_summary "$backend_summary" \
-        '{iteration: $iteration, mode: $mode, branch: $branch, backend: $backend,
+        '{iteration: $iteration, mode: $mode, branch: $branch,
+          commit: (if $commit == "" then null else $commit end),
+          dirty: $dirty, backend: $backend,
           model: $model, started: $started, ended: $ended, wall_s: $wall_s}
          + $backend_summary
          + {git: {commits: $commits, files_changed: $files,
@@ -951,6 +967,38 @@ metrics_summary_suffix() {
         + "/-" + (.git.deletions | tostring) + ")"
         + (if (.tools | length) > 0 then " · " + (.tools | to_entries | sort_by(-.value)
             | map(.key + " " + (.value | tostring)) | join(", ")) else "" end)' 2>/dev/null || true
+}
+
+# Launch the cross-run Streamlit dashboard. `ralph metrics` summarises one run
+# as text; this aggregates every run under .ralph/metrics*/ so cost and progress
+# can be compared across runs, branches and models.
+cmd_dashboard() {
+    local script="$CONFIG_DIR/scripts/metrics-dashboard.py"
+    # Prefer the installed copy; fall back to a git checkout so the command works
+    # before install.sh has been run.
+    if [[ ! -f "$script" ]]; then
+        local here
+        here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+        script="$here/scripts/metrics-dashboard.py"
+    fi
+    if [[ ! -f "$script" ]]; then
+        echo "Error: metrics-dashboard.py not found." >&2
+        echo "       Looked in $CONFIG_DIR/scripts/ and alongside this script." >&2
+        echo "       Run install.sh to install it." >&2
+        exit 1
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "Error: uv is required to run the dashboard." >&2
+        echo "       Install it from https://docs.astral.sh/uv/, or run streamlit yourself:" >&2
+        echo "       streamlit run $script" >&2
+        exit 1
+    fi
+    if [[ ! -d "$ARCHIVE_DIR/metrics" && ! -d "$ARCHIVE_DIR/metrics-prev" ]]; then
+        echo "Warning: no $ARCHIVE_DIR/metrics/ here — run this from a ralph workspace." >&2
+    fi
+    echo "Starting dashboard (Ctrl-C to stop)..."
+    exec uv run --with streamlit --with plotly --with pandas \
+        streamlit run "$script" "$@"
 }
 
 cmd_metrics() {
@@ -1475,6 +1523,7 @@ case "${1:-}" in
     sandbox)           shift; cmd_sandbox "$@" ;;
     plan|build|review) cmd_loop "$@" ;;
     metrics)    shift; cmd_metrics "$@" ;;
+    dashboard)  shift; cmd_dashboard "$@" ;;
     init)       shift; cmd_init "$@" ;;
     clean)      cmd_clean ;;
     archive)    cmd_archive ;;
