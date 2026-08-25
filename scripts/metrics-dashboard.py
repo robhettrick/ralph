@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Streamlit dashboard for ralph loop metrics.
 
-Aggregates every run under .ralph/metrics/ (and .ralph/metrics-prev/) rather than
-a single run, so cost and progress can be compared across runs and branches.
+Aggregates every run under .ralph/metrics/ rather than a single run, so cost and
+progress can be compared across runs and branches. Also reads
+.ralph/metrics-prev/ if present — a directory ralph never writes to, but which
+an operator may use to move old runs aside without losing them from the totals.
 `ralph metrics` remains the per-run text summary; this is the cross-run view.
 
 Deliberately not wired into the `ralph` script: it needs Python plus streamlit,
@@ -21,8 +23,10 @@ import plotly.express as px
 import streamlit as st
 
 ARCHIVE_DIR = pathlib.Path(os.environ.get("RALPH_ARCHIVE_DIR", ".ralph"))
-# metrics-prev holds runs rotated out by `ralph clean`; include it so history is
-# not silently dropped from totals.
+# metrics-prev is not written by ralph — nothing rotates runs into it. It is a
+# convention for a directory an operator moves old runs into by hand, and it is
+# read here so that history stays in the totals rather than being silently
+# dropped. If it does not exist, only metrics/ is scanned.
 SEARCH_DIRS = ("metrics", "metrics-prev")
 
 st.set_page_config(page_title="ralph metrics", page_icon="🔁", layout="wide")
@@ -123,7 +127,9 @@ with st.sidebar:
     if sel_runs:
         df = df[df["run"].isin(sel_runs)]
     if not st.checkbox("Include archived runs", value=True,
-                       help="Runs rotated into metrics-prev by `ralph clean`."):
+                       help="Runs under .ralph/metrics-prev/ — a directory you "
+                            "populate yourself by moving old runs aside. ralph "
+                            "never writes to it."):
         df = df[~df["archived"]]
 
 view = df
