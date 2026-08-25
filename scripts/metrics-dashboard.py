@@ -5,7 +5,9 @@ Aggregates every run under .ralph/metrics/ (and .ralph/metrics-prev/) rather tha
 a single run, so cost and progress can be compared across runs and branches.
 `ralph metrics` remains the per-run text summary; this is the cross-run view.
 
-Run it from a ralph workspace:
+Deliberately not wired into the `ralph` script: it needs Python plus streamlit,
+plotly and pandas, and ralph depends on nothing beyond the backend CLI, git and
+jq. Run it directly from a ralph workspace instead:
 
     uv run --with streamlit --with plotly --with pandas \
       streamlit run ~/.config/ralph/scripts/metrics-dashboard.py

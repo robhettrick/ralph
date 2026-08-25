@@ -180,8 +180,6 @@ Modes:
   archive        Move IMPLEMENTATION_PLAN.md, PROGRESS.md, LEARNINGS.md and
                  plan/ task files to .ralph/<timestamp>/
   metrics        Summarise a run's loop metrics (latest run, or a given metrics.jsonl)
-  dashboard      Cross-run metrics dashboard: every run, filterable by branch,
-                 model, mode and run (needs uv)
 
 Sandbox options:
       --rebuild            Rebuild the container image from scratch
@@ -969,38 +967,6 @@ metrics_summary_suffix() {
             | map(.key + " " + (.value | tostring)) | join(", ")) else "" end)' 2>/dev/null || true
 }
 
-# Launch the cross-run Streamlit dashboard. `ralph metrics` summarises one run
-# as text; this aggregates every run under .ralph/metrics*/ so cost and progress
-# can be compared across runs, branches and models.
-cmd_dashboard() {
-    local script="$CONFIG_DIR/scripts/metrics-dashboard.py"
-    # Prefer the installed copy; fall back to a git checkout so the command works
-    # before install.sh has been run.
-    if [[ ! -f "$script" ]]; then
-        local here
-        here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-        script="$here/scripts/metrics-dashboard.py"
-    fi
-    if [[ ! -f "$script" ]]; then
-        echo "Error: metrics-dashboard.py not found." >&2
-        echo "       Looked in $CONFIG_DIR/scripts/ and alongside this script." >&2
-        echo "       Run install.sh to install it." >&2
-        exit 1
-    fi
-    if ! command -v uv >/dev/null 2>&1; then
-        echo "Error: uv is required to run the dashboard." >&2
-        echo "       Install it from https://docs.astral.sh/uv/, or run streamlit yourself:" >&2
-        echo "       streamlit run $script" >&2
-        exit 1
-    fi
-    if [[ ! -d "$ARCHIVE_DIR/metrics" && ! -d "$ARCHIVE_DIR/metrics-prev" ]]; then
-        echo "Warning: no $ARCHIVE_DIR/metrics/ here — run this from a ralph workspace." >&2
-    fi
-    echo "Starting dashboard (Ctrl-C to stop)..."
-    exec uv run --with streamlit --with plotly --with pandas \
-        streamlit run "$script" "$@"
-}
-
 cmd_metrics() {
     local file="${1:-}"
     if [[ -z "$file" ]]; then
@@ -1523,7 +1489,6 @@ case "${1:-}" in
     sandbox)           shift; cmd_sandbox "$@" ;;
     plan|build|review) cmd_loop "$@" ;;
     metrics)    shift; cmd_metrics "$@" ;;
-    dashboard)  shift; cmd_dashboard "$@" ;;
     init)       shift; cmd_init "$@" ;;
     clean)      cmd_clean ;;
     archive)    cmd_archive ;;

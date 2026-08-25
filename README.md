@@ -60,11 +60,16 @@ This places `ralph` in `~/.local/bin/`, default prompts in `~/.config/ralph/prom
 
 Every real (non-dry-run) `plan` or `build` run records one JSON line per iteration to `.ralph/metrics/<branch>-<timestamp>-<pid>/metrics.jsonl`, alongside the raw backend event stream (`iter-NNN.stream.jsonl`) for deeper analysis. Captured per iteration: wall-clock and API duration, turn count, cost (USD), token usage (input, output, cache read/write), git activity (commits, files changed, insertions/deletions), `IMPLEMENTATION_PLAN.md` items completed, a tool-call histogram, and a noop flag. The loop prints a one-line summary after each iteration, and `ralph metrics` prints the per-iteration table and run totals. Result-event fields are populated for the `claude` backend; other backends record timing and git activity with the rest as nulls. `ralph init --gitignore` ignores `.ralph/`, so metrics need never touch the working tree the loop commits from. Each row also records the branch, the commit the iteration started from, and whether the tree was dirty, so spend can be attributed to a specific attempt.
 
-`ralph dashboard` opens a cross-run Streamlit dashboard (needs [uv](https://docs.astral.sh/uv/)). Where `ralph metrics` summarises a single run as text, the dashboard aggregates **every** run under `.ralph/metrics/` and `.ralph/metrics-prev/`, filterable by branch, model, mode and run:
+`scripts/metrics-dashboard.py` is an optional cross-run dashboard. Where `ralph metrics` summarises a single run as text using only jq, the dashboard aggregates **every** run under `.ralph/metrics/` and `.ralph/metrics-prev/`, filterable by branch, model, mode and run.
+
+It is deliberately **not** a `ralph` subcommand: it needs Python plus streamlit, plotly and pandas, and `ralph` itself depends on nothing beyond the backend CLI, git and jq. Run it directly instead, from a ralph workspace:
 
 ```bash
-ralph dashboard                    # from a ralph workspace
+uv run --with streamlit --with plotly --with pandas \
+  streamlit run ~/.config/ralph/scripts/metrics-dashboard.py
 ```
+
+[uv](https://docs.astral.sh/uv/) fetches the interpreter and packages into a throwaway environment on first run, so nothing is installed permanently and `ralph` gains no dependency.
 
 It shows total and per-run spend, spend by branch, cost against iteration and code churn, mean cost per iteration by model and mode, cumulative spend, and a tool-call histogram. It also surfaces **no-op spend** — iterations that produced no commit — which is the quickest way to spot a loop burning money without making progress.
 
@@ -83,7 +88,6 @@ ralph build -b codex                                # build using codex backend
 ralph plan -b codex -g "design the auth module"     # plan with codex
 ralph build --dry-run -b codex                      # dry-run with codex
 ralph metrics                                       # text summary of the latest run
-ralph dashboard                                     # cross-run dashboard (all branches)
 ralph build -b copilot -n 10                        # 10 iterations with copilot
 ralph build -b pi -n 10                             # 10 iterations with pi
 ralph review                                        # review the branch, write REVIEW.md
