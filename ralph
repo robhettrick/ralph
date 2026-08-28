@@ -872,7 +872,7 @@ iso_utc() {
 write_iteration_metrics() {
     local metrics_file="$1" raw_file="$2" mode="$3" branch="$4" backend="$5" model="$6"
     local iteration="$7" started="$8" ended="$9" head_before="${10}" head_after="${11}" plan_done_before="${12}"
-    local plan_noop="${13:-}"
+    local plan_noop="${13:-}" dirty_before="${14:-}"
 
     local commits=0 stat="" files="" ins="" del="" noop=true
     if [[ "$head_before" != "$head_after" ]]; then
@@ -920,9 +920,20 @@ write_iteration_metrics() {
           }' "$raw_file" 2>/dev/null) || backend_summary='{}'
     [[ -z "$backend_summary" ]] && backend_summary='{}'
 
+    # The branch alone does not pin the inputs: record the commit the iteration
+    # started from, and whether the tree was dirty at that point. Both are
+    # best-effort — a non-git checkout yields nulls rather than failing a run.
+    # dirty arrives as a parameter, snapshotted at the same instant as
+    # head_before: by the time this runs the backend has finished (and in build
+    # mode committed), and ralph has written its raw stream into the tree, so
+    # recomputing it here would describe the end of the iteration instead.
+    local head_commit
+    head_commit=$(git rev-parse --short "$head_before" 2>/dev/null || true)
+
     jq -cn \
         --argjson iteration "$iteration" \
         --arg mode "$mode" --arg branch "$branch" \
+        --arg commit "$head_commit" --arg dirty "$dirty_before" \
         --arg backend "$backend" --arg model "$model" \
         --arg started "$(iso_utc "$started")" \
         --arg ended "$(iso_utc "$ended")" \
@@ -931,7 +942,10 @@ write_iteration_metrics() {
         --argjson insertions "$ins" --argjson deletions "$del" \
         --argjson noop "$noop" --argjson plan_done "$plan_delta" \
         --argjson backend_summary "$backend_summary" \
-        '{iteration: $iteration, mode: $mode, branch: $branch, backend: $backend,
+        '{iteration: $iteration, mode: $mode, branch: $branch,
+          commit: (if $commit == "" then null else $commit end),
+          dirty: (if $dirty == "" then null else $dirty == "true" end),
+          backend: $backend,
           model: $model, started: $started, ended: $ended, wall_s: $wall_s}
          + $backend_summary
          + {git: {commits: $commits, files_changed: $files,
@@ -1232,6 +1246,22 @@ cmd_loop() {
         # fingerprints the artifacts it is allowed to change instead.
         local head_before plan_state_before="" plan_state_after=""
         head_before=$(git rev-parse HEAD)
+        # Snapshot dirtiness alongside head_before so both describe the same
+        # instant. Computed after the backend ran it would describe the end of the
+        # iteration, and would read true on nearly every iteration by default:
+        # ralph writes its own raw stream into .ralph/ before metrics are recorded,
+        # and `ralph init` gitignores .ralph/ only when given --gitignore, so that
+        # one untracked file alone makes `git status --porcelain` non-empty.
+        local dirty_before
+        if git rev-parse --git-dir >/dev/null 2>&1; then
+            if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+                dirty_before=true
+            else
+                dirty_before=false
+            fi
+        else
+            dirty_before=""
+        fi
         if [[ "$mode" == "plan" ]]; then
             plan_state_before=$(plan_state_hash)
         fi
@@ -1384,7 +1414,7 @@ cmd_loop() {
                 if write_iteration_metrics "$metrics_file" "$raw_file" "$mode" \
                     "$current_branch" "$BACKEND_NAME" "$model" "$iteration" \
                     "$iter_start" "$iter_end" "$head_before" "$head_after_m" \
-                    "$plan_done_before" "$plan_noop"; then
+                    "$plan_done_before" "$plan_noop" "$dirty_before"; then
                     echo ""
                     truncate_line "Metrics: $(fmt_duration $((iter_end - iter_start))) wall$(metrics_summary_suffix "$metrics_file")" "$line_width"
                 else

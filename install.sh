@@ -38,6 +38,19 @@ mkdir -p "$CONFIG_DIR/skills/commit"
 cp "$SCRIPT_DIR/skills/commit/SKILL.md" "$CONFIG_DIR/skills/commit/SKILL.md"
 echo "  Skills:     $CONFIG_DIR/skills/"
 
+# Install helper scripts (metrics dashboard)
+if [[ -d "$SCRIPT_DIR/scripts" ]]; then
+    mkdir -p "$CONFIG_DIR/scripts"
+    for file in "$SCRIPT_DIR/scripts"/*; do
+        [[ -f "$file" ]] || continue
+        cp "$file" "$CONFIG_DIR/scripts/$(basename "$file")"
+        if [[ "$file" == *.py || "$file" == *.sh ]]; then
+            chmod +x "$CONFIG_DIR/scripts/$(basename "$file")"
+        fi
+    done
+    echo "  Scripts:    $CONFIG_DIR/scripts/"
+fi
+
 # Check PATH
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo ""
