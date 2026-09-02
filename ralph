@@ -857,30 +857,13 @@ next_plan_item() {
 # fact. This renders the same stream as it arrives, as readable lines — what the
 # agent said, which tool it reached for, and how each call turned out — so a
 # long run can be watched rather than autopsied.
-#
-# Every rendered line is `<indent><marker> <body>`, where the marker says what
-# kind of event it was. Keeping the markers to a single column means a long run
-# can be skimmed vertically — prose, tool calls and failures each form their own
-# visual channel without needing colour, which the rest of the script avoids.
 STREAM_MARKER_TEXT='·'    # what the agent said
 STREAM_MARKER_TOOL='→'    # a tool it invoked
 STREAM_MARKER_FAIL='✗'    # a tool call that came back an error
 STREAM_MARKER_DONE='◆'    # the end-of-run result event
-
-# Width budget for one rendered line, excluding the indent and marker. Matches
-# the fixed 120-column layout the rest of the loop's output is built for.
 STREAM_LINE_WIDTH=110
-
-# Column the tool argument starts at, so tool names line up and the eye can run
-# down the arguments. Wide enough for the common built-ins (Read, Bash, Edit,
-# Grep, WebFetch, TodoWrite); a longer name overflows its column rather than
-# being cut, since a truncated tool name is not worth the alignment.
 STREAM_TOOL_COL=10
 
-# Shortens text to fit `max` columns, on the assumption the caller wants the
-# most identifying part. For a path, that is the tail — every path in a run
-# shares a prefix and differs in the filename — so those are cut from the left.
-# Anything else reads left to right and is cut from the right.
 stream_oneline() {
     local text="$1" max="${2:-100}"
     text=${text//$'\n'/ }
@@ -896,18 +879,12 @@ stream_oneline() {
     fi
 }
 
-# Emits one rendered line: indent, marker, then the body trimmed to the width
-# budget. Blank bodies are dropped, so callers can pipe jq output straight in
-# without filtering empties themselves.
 stream_line() {
     local marker="$1" body="$2"
     [[ -z "$body" ]] && return
     printf '    %s %s\n' "$marker" "$(stream_oneline "$body" "$STREAM_LINE_WIDTH")"
 }
 
-# Emits a tool call as `<name padded to column> <argument>`. The name and the
-# argument are trimmed separately: the argument gets whatever the name leaves,
-# so a long path is shortened instead of pushing the line over the budget.
 stream_tool_line() {
     local name="$1" arg="$2"
     local pad=$((STREAM_TOOL_COL - ${#name}))
