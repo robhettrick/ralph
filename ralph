@@ -858,16 +858,29 @@ next_plan_item() {
 # agent said, which tool it reached for, and how each call turned out — so a
 # long run can be watched rather than autopsied.
 #
-# Only the claude backend emits a per-event stream (BACKEND_STREAM_FILTER);
-# the others return one blob at the end, so --stream is a no-op there and the
-# flag says so at startup rather than silently doing nothing.
+# Every rendered line is `<indent><marker> <body>`, where the marker says what
+# kind of event it was. Keeping the markers to a single column means a long run
+# can be skimmed vertically — prose, tool calls and failures each form their own
+# visual channel without needing colour, which the rest of the script avoids.
+STREAM_MARKER_TEXT='·'    # what the agent said
+STREAM_MARKER_TOOL='→'    # a tool it invoked
+STREAM_MARKER_FAIL='✗'    # a tool call that came back an error
+STREAM_MARKER_DONE='◆'    # the end-of-run result event
 
-# Truncate to a terminal-friendly width, collapsing newlines so a multi-line
-# command or message stays on one line.
-#
-# Over-long paths are elided from the left, not the right: the filename is the
-# identifying part, and truncating a deep path from the right leaves every line
-# looking the same. Prose is truncated from the right as usual.
+# Width budget for one rendered line, excluding the indent and marker. Matches
+# the fixed 120-column layout the rest of the loop's output is built for.
+STREAM_LINE_WIDTH=110
+
+# Column the tool argument starts at, so tool names line up and the eye can run
+# down the arguments. Wide enough for the common built-ins (Read, Bash, Edit,
+# Grep, WebFetch, TodoWrite); a longer name overflows its column rather than
+# being cut, since a truncated tool name is not worth the alignment.
+STREAM_TOOL_COL=10
+
+# Shortens text to fit `max` columns, on the assumption the caller wants the
+# most identifying part. For a path, that is the tail — every path in a run
+# shares a prefix and differs in the filename — so those are cut from the left.
+# Anything else reads left to right and is cut from the right.
 stream_oneline() {
     local text="$1" max="${2:-100}"
     text=${text//$'\n'/ }
@@ -883,33 +896,54 @@ stream_oneline() {
     fi
 }
 
-# Reads stream-json on stdin, writes human-readable lines to stdout. Unparseable
-# lines are skipped: this is a view, and it must never interfere with the run.
+# Emits one rendered line: indent, marker, then the body trimmed to the width
+# budget. Blank bodies are dropped, so callers can pipe jq output straight in
+# without filtering empties themselves.
+stream_line() {
+    local marker="$1" body="$2"
+    [[ -z "$body" ]] && return
+    printf '    %s %s\n' "$marker" "$(stream_oneline "$body" "$STREAM_LINE_WIDTH")"
+}
+
+# Emits a tool call as `<name padded to column> <argument>`. The name and the
+# argument are trimmed separately: the argument gets whatever the name leaves,
+# so a long path is shortened instead of pushing the line over the budget.
+stream_tool_line() {
+    local name="$1" arg="$2"
+    local pad=$((STREAM_TOOL_COL - ${#name}))
+    (( pad < 1 )) && pad=1
+    local gap
+    gap=$(printf '%*s' "$pad" '')
+    if [[ -z "$arg" ]]; then
+        printf '    %s %s\n' "$STREAM_MARKER_TOOL" "$name"
+        return
+    fi
+    printf '    %s %s%s%s\n' "$STREAM_MARKER_TOOL" "$name" "$gap" \
+        "$(stream_oneline "$arg" $((STREAM_LINE_WIDTH - STREAM_TOOL_COL - 1)))"
+}
+
 format_stream() {
-    local indent="    "
     local line type
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         type=$(jq -r 'try .type // empty' <<<"$line" 2>/dev/null) || continue
         case "$type" in
             assistant)
-                # The agent's own commentary, then each tool it invoked. Tool
-                # calls print their description when the backend supplies one
-                # (Bash does), else the most identifying input field.
                 jq -r '
+                    def clean: gsub("\t"; " ");
                     (.message.content // [])[]
                     | if .type == "text" then
                         # A long sign-off arrives as one multi-paragraph block;
                         # emit each non-empty line separately so every rendered
                         # line carries its own marker.
                         (.text | split("\n")[] | gsub("^\\s+|\\s+$"; "")) as $t
-                        | if $t == "" then empty else "· " + $t end
+                        | if $t == "" then empty else "text\t-\t" + ($t | clean) end
                       elif .type == "tool_use" then
                         # Paths are shown relative to the workspace root: the
                         # container prefix is identical on every line and only
                         # pushes the filename off the end.
                         ((.input.file_path // "") | sub("^/workspace/"; "")) as $path
-                        | "→ " + .name + " " + (
+                        | "tool\t" + (.name | clean) + "\t" + ((
                             .input.description
                             // (if $path == "" then null else $path end)
                             // .input.command
@@ -917,34 +951,33 @@ format_stream() {
                             // .input.pattern
                             // .input.prompt
                             // ""
-                        )
+                        ) | clean)
                       else empty end' <<<"$line" 2>/dev/null \
-                | while IFS= read -r rendered; do
-                    [[ -z "$rendered" ]] && continue
-                    printf '%s%s\n' "$indent" "$(stream_oneline "$rendered" 110)"
+                | while IFS=$'\t' read -r kind name body; do
+                    case "$kind" in
+                        text) stream_line "$STREAM_MARKER_TEXT" "$body" ;;
+                        tool) stream_tool_line "$name" "$body" ;;
+                    esac
                 done
                 ;;
             user)
-                # Tool results: report failures only. Successes are implied by
-                # the next step, and echoing them back doubles the log.
                 jq -r '
                     (.message.content // [])[]
                     | select(.type == "tool_result" and .is_error == true)
-                    | "✗ " + ((.content // "") | if type == "array"
+                    | ((.content // "") | if type == "array"
                         then (map(.text // "") | join(" ")) else tostring end)' <<<"$line" 2>/dev/null \
                 | while IFS= read -r rendered; do
-                    [[ -z "$rendered" ]] && continue
-                    printf '%s%s\n' "$indent" "$(stream_oneline "$rendered" 110)"
+                    stream_line "$STREAM_MARKER_FAIL" "$rendered"
                 done
                 ;;
             result)
                 jq -r '
-                    "◆ " + (.subtype // "done")
+                    (.subtype // "done")
                     + (if .num_turns then " · " + (.num_turns | tostring) + " turns" else "" end)
                     + (if .total_cost_usd then " · $" + (((.total_cost_usd * 100 | round) / 100) | tostring) else "" end)' \
                     <<<"$line" 2>/dev/null \
                 | while IFS= read -r rendered; do
-                    [[ -n "$rendered" ]] && printf '%s%s\n' "$indent" "$rendered"
+                    stream_line "$STREAM_MARKER_DONE" "$rendered"
                 done
                 ;;
         esac
