@@ -45,6 +45,9 @@ backend_claude() {
     # shellcheck disable=SC2317,SC2329  # Invoked indirectly via resolve_backend
     build_backend_cmd() {
         local model="$1"
+        # Emits one JSON event per line as work happens, so --stream can render a
+        # live activity log; the other backends return one blob at the end.
+        BACKEND_STREAMS_EVENTS=true
         BACKEND_CMD=(claude -p "$BACKEND_PERMISSION_FLAG" --output-format=stream-json --model "$model" --verbose)
     }
 }
@@ -62,6 +65,7 @@ backend_codex() {
     # shellcheck disable=SC2317,SC2329  # Invoked indirectly via resolve_backend
     build_backend_cmd() {
         local model="$1"
+        BACKEND_STREAMS_EVENTS=false
         BACKEND_CMD=(codex exec "$BACKEND_PERMISSION_FLAG" --json --model "$model")
     }
 }
@@ -79,6 +83,7 @@ backend_copilot() {
     # shellcheck disable=SC2317,SC2329  # Invoked indirectly via resolve_backend
     build_backend_cmd() {
         local model="$1"
+        BACKEND_STREAMS_EVENTS=false
         BACKEND_CMD=(copilot --output-format=json "$BACKEND_PERMISSION_FLAG" --model "$model" -p)
     }
 }
@@ -107,6 +112,7 @@ backend_pi() {
     # shellcheck disable=SC2317,SC2329  # Invoked indirectly via resolve_backend
     build_backend_cmd() {
         local model="$1"
+        BACKEND_STREAMS_EVENTS=false
         BACKEND_CMD=(pi -p --mode json --model "$model" --no-session)
     }
 }
@@ -205,6 +211,9 @@ Options:
       --skip-push      Don't push after each build iteration (plan never pushes)
       --dry-run        Print what would be executed without running
       --no-metrics     Don't record per-iteration metrics under .ralph/metrics/
+  -s, --stream         Show a readable live activity log while each iteration
+                       runs (claude backend only; other backends return one
+                       response at the end, so there is nothing to stream)
   -v, --verbose        Show backend commands, raw output, and exit codes
   -y, --yes            Skip the confirmation when running outside a sandbox
       --max-retries-per-iteration N
@@ -842,6 +851,117 @@ next_plan_item() {
     }'
 }
 
+# --- Live activity log (--stream) ---
+#
+# --verbose exists for diagnosing the pipeline: it dumps the raw JSON after the
+# fact. This renders the same stream as it arrives, as readable lines — what the
+# agent said, which tool it reached for, and how each call turned out — so a
+# long run can be watched rather than autopsied.
+STREAM_MARKER_TEXT='·'    # what the agent said
+STREAM_MARKER_TOOL='→'    # a tool it invoked
+STREAM_MARKER_FAIL='✗'    # a tool call that came back an error
+STREAM_MARKER_DONE='◆'    # the end-of-run result event
+STREAM_LINE_WIDTH=110
+STREAM_TOOL_COL=10
+
+stream_oneline() {
+    local text="$1" max="${2:-100}"
+    text=${text//$'\n'/ }
+    text=$(printf '%s' "$text" | tr -s ' ')
+    if [[ ${#text} -le $max ]]; then
+        printf '%s' "$text"
+        return
+    fi
+    if [[ "$text" != *' '* && "$text" == */?* ]]; then
+        printf '…%s' "${text: -$((max - 1))}"
+    else
+        printf '%s…' "${text:0:$((max - 1))}"
+    fi
+}
+
+stream_line() {
+    local marker="$1" body="$2"
+    [[ -z "$body" ]] && return
+    printf '    %s %s\n' "$marker" "$(stream_oneline "$body" "$STREAM_LINE_WIDTH")"
+}
+
+stream_tool_line() {
+    local name="$1" arg="$2"
+    local pad=$((STREAM_TOOL_COL - ${#name}))
+    (( pad < 1 )) && pad=1
+    local gap
+    gap=$(printf '%*s' "$pad" '')
+    if [[ -z "$arg" ]]; then
+        printf '    %s %s\n' "$STREAM_MARKER_TOOL" "$name"
+        return
+    fi
+    printf '    %s %s%s%s\n' "$STREAM_MARKER_TOOL" "$name" "$gap" \
+        "$(stream_oneline "$arg" $((STREAM_LINE_WIDTH - STREAM_TOOL_COL - 1)))"
+}
+
+format_stream() {
+    local line type
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        type=$(jq -r 'try .type // empty' <<<"$line" 2>/dev/null) || continue
+        case "$type" in
+            assistant)
+                jq -r '
+                    def clean: gsub("\t"; " ");
+                    (.message.content // [])[]
+                    | if .type == "text" then
+                        # A long sign-off arrives as one multi-paragraph block;
+                        # emit each non-empty line separately so every rendered
+                        # line carries its own marker.
+                        (.text | split("\n")[] | gsub("^\\s+|\\s+$"; "")) as $t
+                        | if $t == "" then empty else "text\t-\t" + ($t | clean) end
+                      elif .type == "tool_use" then
+                        # Paths are shown relative to the workspace root: the
+                        # container prefix is identical on every line and only
+                        # pushes the filename off the end.
+                        ((.input.file_path // "") | sub("^/workspace/"; "")) as $path
+                        | "tool\t" + (.name | clean) + "\t" + ((
+                            .input.description
+                            // (if $path == "" then null else $path end)
+                            // .input.command
+                            // .input.skill
+                            // .input.pattern
+                            // .input.prompt
+                            // ""
+                        ) | clean)
+                      else empty end' <<<"$line" 2>/dev/null \
+                | while IFS=$'\t' read -r kind name body; do
+                    case "$kind" in
+                        text) stream_line "$STREAM_MARKER_TEXT" "$body" ;;
+                        tool) stream_tool_line "$name" "$body" ;;
+                    esac
+                done
+                ;;
+            user)
+                jq -r '
+                    (.message.content // [])[]
+                    | select(.type == "tool_result" and .is_error == true)
+                    | ((.content // "") | if type == "array"
+                        then (map(.text // "") | join(" ")) else tostring end)' <<<"$line" 2>/dev/null \
+                | while IFS= read -r rendered; do
+                    stream_line "$STREAM_MARKER_FAIL" "$rendered"
+                done
+                ;;
+            result)
+                jq -r '
+                    (.subtype // "done")
+                    + (if .num_turns then " · " + (.num_turns | tostring) + " turns" else "" end)
+                    + (if .total_cost_usd then " · $" + (((.total_cost_usd * 100 | round) / 100) | tostring) else "" end)' \
+                    <<<"$line" 2>/dev/null \
+                | while IFS= read -r rendered; do
+                    stream_line "$STREAM_MARKER_DONE" "$rendered"
+                done
+                ;;
+        esac
+    done
+    return 0
+}
+
 # --- Metrics capture ---
 # Each non-dry-run iteration appends one JSON line to
 # .ralph/metrics/<branch>-<run>/metrics.jsonl and retains the raw backend
@@ -1044,6 +1164,7 @@ cmd_loop() {
     local assume_yes=false
     local max_retries_opt=""
     local no_retry=false
+    local stream=false
     local no_metrics=false
 
     # Parsed by hand rather than with getopt(1). BSD getopt, which is what macOS
@@ -1069,6 +1190,7 @@ cmd_loop() {
             --dry-run)       dry_run=true;        shift ;;
             --no-metrics)    no_metrics=true;     shift ;;
             --no-retry)      no_retry=true;       shift ;;
+            -s|--stream)     stream=true;         shift ;;
             -v|--verbose)    verbose=true;        shift ;;
             -y|--yes)        assume_yes=true;     shift ;;
             -h|--help)       usage ;;
@@ -1149,6 +1271,18 @@ cmd_loop() {
     # Build the backend command array now that model is resolved
     build_backend_cmd "$model"
 
+    # --stream renders a live activity log, but only backends that emit
+    # per-event JSON have anything to render. Say so at startup rather than
+    # silently doing nothing.
+    local stream_live=false
+    if $stream; then
+        if [[ "${BACKEND_STREAMS_EVENTS:-false}" == "true" ]]; then
+            stream_live=true
+        else
+            echo "Note: --stream needs a backend that emits per-event JSON; '$BACKEND_NAME' returns one response at the end, so there is nothing to stream." >&2
+        fi
+    fi
+
     # Metrics capture (on by default for real runs; see --no-metrics)
     local metrics_enabled=true
     ($dry_run || $no_metrics) && metrics_enabled=false
@@ -1209,6 +1343,11 @@ cmd_loop() {
             fi
         fi
     fi
+
+    # format_stream writes to fd 3, not stdout: command substitution is capturing
+    # the backend's stdout, so anything the formatter printed there would be
+    # swallowed into $backend_output instead of reaching the terminal.
+    exec 3>&1
 
     local iteration=0
     local consecutive_noops=0
@@ -1314,7 +1453,7 @@ cmd_loop() {
                         else
                             cat >&2
                         fi
-                    )) || backend_exit=$?
+                    ) | if $stream_live; then tee >(format_stream >&3); else cat; fi) || backend_exit=$?
                 else
                     backend_output=$("${BACKEND_CMD[@]}" "$prompt" 2> >(
                         if $verbose; then
@@ -1324,7 +1463,7 @@ cmd_loop() {
                         else
                             cat >&2
                         fi
-                    )) || backend_exit=$?
+                    ) | if $stream_live; then tee >(format_stream >&3); else cat; fi) || backend_exit=$?
                 fi
 
                 [[ $backend_exit -eq 0 ]] && break

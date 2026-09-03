@@ -58,6 +58,68 @@ This places `ralph` in `~/.local/bin/`, default prompts in `~/.config/ralph/prom
 
 ### Loop metrics
 
+### Watching a run
+
+By default the loop is silent while an iteration runs, then prints the backend's
+final message. `--stream` (or `-s`) renders the event stream as it arrives, so a
+long run can be watched rather than waited out:
+
+```
+=================================== ITERATION 3 / 12 ===================================
+
+Next:    Add GET /reference/{id} — single-record lookup.
+
+    · I'll start with Phase 1 — understanding the current state.
+    → Bash Read tail of progress
+    → Read sam-frontend/src/server/routes/reference/index.js
+    → Edit sam-frontend/src/server/routes/reference/index.js
+    · Now Phase 3 — verify.
+    → Bash Run the frontend test suite
+    ✗ ENOENT: no such file
+    → Skill commit
+    ◆ success · 48 turns · $2.38
+```
+
+Each line is one event: `·` the agent's own commentary, `→` a tool call (its
+description, or the file it touched), `✗` a tool call that failed, and `◆` the
+end-of-iteration summary. Thinking blocks and successful tool output are left
+out — the log is a summary of what happened, not a transcript.
+
+This is not `--verbose`, which exists for debugging the pipeline: that prints the
+backend command, the raw JSON, and exit codes, after the fact. The two can be
+combined. `--stream` needs a backend that emits per-event JSON, which today means
+`claude`; the others return a single response at the end, and the flag says so at
+startup rather than doing nothing quietly.
+
+### Loop metrics
+
+Every real (non-dry-run) `plan` or `build` run records one JSON line per iteration to `.ralph/metrics/<branch>-<timestamp>-<pid>/metrics.jsonl`, alongside the raw backend event stream (`iter-NNN.stream.jsonl`) for deeper analysis. Captured per iteration: wall-clock and API duration, turn count, cost (USD), token usage (input, output, cache read/write), git activity (commits, files changed, insertions/deletions), `IMPLEMENTATION_PLAN.md` items completed, a tool-call histogram, and a noop flag. The loop prints a one-line summary after each iteration, and `ralph metrics` prints the per-iteration table and run totals. Result-event fields are populated for the `claude` backend; other backends record timing and git activity with the rest as nulls. `.ralph/` is gitignored by `ralph init`, so metrics never touch the working tree the loop commits from.
+
+### Examples
+
+```bash
+ralph sandbox                                       # enter devcontainer
+ralph sandbox --rebuild                             # rebuild and enter
+ralph sandbox --no-inhibit-sleep                    # enter without holding the host awake
+ralph sandbox clean                                 # remove the container
+ralph plan                                          # analyse and plan
+ralph plan -g "Migrate to hexagonal architecture"   # plan with a goal
+ralph build                                         # implement next item
+ralph build -n 10 -m sonnet                         # 10 iterations, sonnet pinned (ignores tiers)
+ralph build -b codex                                # build using codex backend
+ralph plan -b codex -g "design the auth module"     # plan with codex
+ralph build --dry-run -b codex                      # dry-run with codex
+ralph build -b copilot -n 10                        # 10 iterations with copilot
+ralph build -b pi -n 10                             # 10 iterations with pi
+ralph build --stream                                # watch the run as a readable log
+ralph review                                        # review the branch, write REVIEW.md
+ralph review -g "Focus on FT-001 rule coverage"     # review with a focus
+ralph archive                                       # archive before starting fresh
+ralph init                                          # initialise workspace
+ralph init --prompts                                # also copy prompts for customisation
+```
+
+
 Every real (non-dry-run) `plan` or `build` run records one JSON line per iteration to `.ralph/metrics/<branch>-<timestamp>-<pid>/metrics.jsonl`, alongside the raw backend event stream (`iter-NNN.stream.jsonl`) for deeper analysis. Captured per iteration: wall-clock and API duration, turn count, cost (USD), token usage (input, output, cache read/write), git activity (commits, files changed, insertions/deletions), `IMPLEMENTATION_PLAN.md` items completed, a tool-call histogram, and a noop flag. The loop prints a one-line summary after each iteration, and `ralph metrics` prints the per-iteration table and run totals. Result-event fields are populated for the `claude` backend; other backends record timing and git activity with the rest as nulls. `ralph init --gitignore` ignores `.ralph/`, so metrics need never touch the working tree the loop commits from. Each row also records the branch, the commit the iteration started from, and whether the tree was dirty, so spend can be attributed to a specific attempt.
 
 `scripts/metrics-dashboard.py` is an optional cross-run dashboard. Where `ralph metrics` summarises a single run as text using only jq, the dashboard aggregates **every** run under `.ralph/metrics/`, filterable by branch, model, mode and run. It also reads `.ralph/metrics-prev/` when that directory exists — ralph never writes to it, but moving old runs there keeps them out of `.ralph/metrics/` without dropping them from the dashboard's totals.
