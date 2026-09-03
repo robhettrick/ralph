@@ -7,9 +7,9 @@ What belongs here: a fact you would want on your next iteration. What does not:
 what one iteration did (`PROGRESS.md`), a decision and its reasoning (`specs/`), or
 anything already obvious from reading the source.
 
-Keep the whole file under about 300 lines. When it grows past that, merge
-overlapping entries rather than appending. One line per learning, most relevant
-first within each section.
+Keep the whole file under 100KB. When it grows past that, merge
+overlapping entries or remove irrelevant ones rather than appending.
+One line per learning, most relevant first within each section.
 
 ## Patterns
 
