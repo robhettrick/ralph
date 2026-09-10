@@ -482,7 +482,7 @@ cmd_sandbox() {
         exit 1
     fi
 
-    mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.copilot" "$HOME/.pi/agent"
+    mkdir -p "$HOME/.codex" "$HOME/.copilot" "$HOME/.pi/agent"
 
     # Runtime mounts (conditional on host file existence)
     local mounts=()
@@ -576,6 +576,23 @@ cmd_sandbox() {
     local workspace_hash
     workspace_hash=$(echo -n "$PWD" | md5_hash | cut -c1-12) || return 1
     mounts+=("type=volume,source=ralph-history-${workspace_hash},target=/commandhistory")
+
+    # Claude config lives in a container-local volume, not a bind of the host's
+    # ~/.claude. The guest keeps its own onboarding and session state, cannot
+    # write to the host's config, and does not inherit the host's global
+    # CLAUDE.md, MCP servers or plugins. Per workspace because every project
+    # mounts at /workspace, so the project-keyed state inside .claude.json
+    # would otherwise collide across repos.
+    #
+    # Only the OAuth tokens are shared, as a single-file bind so a refresh in
+    # either direction is seen by both. Conditional because the file is absent
+    # whenever credentials live somewhere else — the macOS Keychain, or an
+    # ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN forwarded as env — and a bind of
+    # a missing source aborts `devcontainer up` outright.
+    mounts+=("type=volume,source=ralph-claude-${workspace_hash},target=/home/node/.claude")
+    if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+        mounts+=("type=bind,source=$HOME/.claude/.credentials.json,target=/home/node/.claude/.credentials.json")
+    fi
 
     local mount_flags=()
     for mount in "${mounts[@]}"; do
