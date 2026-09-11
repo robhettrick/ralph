@@ -506,6 +506,62 @@ MKDIREOF
     run ! grep -q "target=/home/node/.pi" "$DEVCONTAINER_CALL_LOG"
 }
 
+# ─── Claude config mount tests ──────────────────────────────────────────────
+# The container gets a private volume for /home/node/.claude rather than a bind
+# of the host's ~/.claude, so the host's global CLAUDE.md, MCP servers, plugins
+# and session state stay out of the sandbox and the guest cannot write back.
+# Only the OAuth token file is shared, and only when the host actually has one
+# — credentials may live in the macOS Keychain or come from ANTHROPIC_API_KEY
+# instead, and a bind of a missing source aborts `devcontainer up` outright.
+# No mkdir shadowing is needed here (unlike the .copilot/.pi tests): cmd_sandbox
+# deliberately no longer creates ~/.claude on the host.
+
+@test "sandbox mounts a container-local volume for the Claude config dir" {
+    setup_sandbox_mock
+    local fake_home="$TEST_DIR/fake-home"
+    mkdir -p "$fake_home"
+    HOME="$fake_home" run "$RALPH" sandbox
+    [[ "$status" -eq 0 ]]
+    grep -qE "^type=volume,source=ralph-claude-[0-9a-f]{12},target=/home/node/.claude$" "$DEVCONTAINER_CALL_LOG"
+}
+
+@test "sandbox never bind-mounts the host ~/.claude directory" {
+    setup_sandbox_mock
+    local fake_home="$TEST_DIR/fake-home"
+    mkdir -p "$fake_home/.claude"
+    HOME="$fake_home" run "$RALPH" sandbox
+    [[ "$status" -eq 0 ]]
+    run ! grep -qF "type=bind,source=$fake_home/.claude,target=/home/node/.claude" "$DEVCONTAINER_CALL_LOG"
+}
+
+@test "sandbox mounts the Claude credentials file when it exists on the host" {
+    setup_sandbox_mock
+    local fake_home="$TEST_DIR/fake-home"
+    mkdir -p "$fake_home/.claude"
+    echo '{"claudeAiOauth":{}}' > "$fake_home/.claude/.credentials.json"
+    HOME="$fake_home" run "$RALPH" sandbox
+    [[ "$status" -eq 0 ]]
+    grep -qF "type=bind,source=$fake_home/.claude/.credentials.json,target=/home/node/.claude/.credentials.json" "$DEVCONTAINER_CALL_LOG"
+}
+
+@test "sandbox skips the credentials mount when the host file does not exist" {
+    setup_sandbox_mock
+    local fake_home="$TEST_DIR/fake-home"
+    mkdir -p "$fake_home/.claude"
+    HOME="$fake_home" run "$RALPH" sandbox
+    [[ "$status" -eq 0 ]]
+    run ! grep -q "target=/home/node/.claude/.credentials.json" "$DEVCONTAINER_CALL_LOG"
+}
+
+@test "sandbox does not create ~/.claude on the host" {
+    setup_sandbox_mock
+    local fake_home="$TEST_DIR/fake-home"
+    mkdir -p "$fake_home"
+    HOME="$fake_home" run "$RALPH" sandbox
+    [[ "$status" -eq 0 ]]
+    [[ ! -e "$fake_home/.claude" ]]
+}
+
 # ─── sleep inhibitor tests ──────────────────────────────────────────────────
 # Mock caffeinate/systemd-inhibit as long-running processes that log "started"
 # immediately and "killed" when they receive SIGTERM — mirroring how cmd_sandbox

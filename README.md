@@ -186,7 +186,7 @@ A devcontainer is suspended along with its host, which stalls a long unattended 
 
 | Source                    | Target                          | Mode      |
 |---------------------------|---------------------------------|-----------|
-| `~/.claude`               | `/home/node/.claude`            | read/write |
+| `~/.claude/.credentials.json` | `/home/node/.claude/.credentials.json` | read/write |
 | `~/.codex`                | `/home/node/.codex`             | read/write |
 | `~/.copilot`              | `/home/node/.copilot`           | read/write |
 | `~/.pi`                   | `/home/node/.pi`                | read/write |
@@ -198,7 +198,9 @@ A devcontainer is suspended along with its host, which stalls a long unattended 
 | `ralph` binary            | `/usr/local/bin/ralph`          | readonly  |
 | ralph config dir           | `/home/node/.config/ralph`      | readonly  |
 
-Optional mounts (`~/.ssh`, `~/.config/gh`, `~/.codex`, `~/.copilot`, `~/.pi`, SSH agent) are skipped if the source doesn't exist on the host. `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GH_TOKEN`, and `GITHUB_TOKEN` are forwarded into the container when set on the host. When neither `GH_TOKEN` nor `GITHUB_TOKEN` is set, ralph derives the token from `gh auth token` so keyring-stored `gh auth login` sessions propagate into the container (modern `gh` keeps the token in the OS keyring, which the `~/.config/gh` mount alone cannot carry). If `gh` is installed but logged out, ralph prints a warning and starts the sandbox without GitHub CLI authentication.
+`/home/node/.claude` is a per-project Docker volume, not a mount of your host `~/.claude`. The sandbox keeps its own Claude Code state: it does not inherit your host's global `CLAUDE.md`, MCP servers or plugins, and it does not write session history back to the host. Only the OAuth token file is shared, so a login on either side works on both and a token refresh is picked up by both. If you authenticate some other way — the macOS Keychain, or `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` — there is no token file to share; run `/login` once inside the sandbox and it persists in the volume.
+
+Optional mounts (`~/.claude/.credentials.json`, `~/.ssh`, `~/.config/gh`, `~/.codex`, `~/.copilot`, `~/.pi`, SSH agent) are skipped if the source doesn't exist on the host. `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GH_TOKEN`, and `GITHUB_TOKEN` are forwarded into the container when set on the host. When neither `GH_TOKEN` nor `GITHUB_TOKEN` is set, ralph derives the token from `gh auth token` so keyring-stored `gh auth login` sessions propagate into the container (modern `gh` keeps the token in the OS keyring, which the `~/.config/gh` mount alone cannot carry). If `gh` is installed but logged out, ralph prints a warning and starts the sandbox without GitHub CLI authentication.
 
 ### SDKMAN
 

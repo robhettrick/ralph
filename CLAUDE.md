@@ -58,8 +58,9 @@ Items are mutable during the plan phase and immutable during the build phase, wh
 
 Uses the `devcontainer` CLI to manage container lifecycle. Key details:
 - Base image: Node.js 20 with Claude Code, gh, git, zsh, jq, ripgrep, Bun, uv, SDKMAN
-- Mounts: workspace, `~/.claude`, `~/.gitconfig`, `~/.ssh`, Docker socket, SSH agent, ralph binary
-- Shell history persists via Docker volumes keyed by a hash of the workspace path
+- Mounts: workspace, `~/.claude/.credentials.json`, `~/.gitconfig`, `~/.ssh`, Docker socket, SSH agent, ralph binary
+- Shell history and the guest's Claude config persist via Docker volumes keyed by a hash of the workspace path
+- `/home/node/.claude` is a container-local volume, not a host mount — the guest does not inherit the host's global `CLAUDE.md` and cannot write to the host's config
 - Runs as `node` user with passwordless sudo
 
 ### Installation layout
