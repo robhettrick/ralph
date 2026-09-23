@@ -1085,7 +1085,7 @@ stray_procs_json() {
     awk 'NR == FNR { if (FNR > 1) seen[$1] = 1; next }
          FNR > 1 && !($1 in seen) {
              args = ""; for (i = 6; i <= NF; i++) args = args (i > 6 ? " " : "") $i
-             if (args ~ /^ps -eo /) next
+             if (args ~ /^ps -eo / || $3 ~ /^00:0[01]$/) next
              print $1 "\t" $3 "\t" args
          }' "$start_file" "$end_file" \
         | jq -R -s -c 'split("\n") | map(select(. != "") | split("\t")
@@ -1093,7 +1093,7 @@ stray_procs_json() {
 }
 
 top_procs_json() {
-    { top -b -n 2 -d 0.5 -o %CPU -w 200 2>/dev/null || true; } \
+    { top -b -c -n 2 -d 0.5 -o %CPU -w 200 2>/dev/null || true; } \
         | awk '/^top -/{frame++} frame == 2 && hdr && NF >= 12 && n < 3 {
                    args = ""; for (i = 12; i <= NF; i++) args = args (i > 12 ? " " : "") $i
                    print $9 "\t" args; n++ }
@@ -1140,13 +1140,13 @@ system_metrics_json() {
     local elapsed_s="$5" ps_start="$6" ps_end="$7" samples_file="$8"
     local samples='[]'
     [[ -s "$samples_file" ]] && samples=$(jq -cs '.' "$samples_file" 2>/dev/null || echo '[]')
-    jq -cn --argjson start "$start_snapshot" --argjson end "$end_snapshot" \
+    jq -cn --argjson at_start "$start_snapshot" --argjson at_end "$end_snapshot" \
         --argjson cpu "$(cpu_pct_json "$counters_before" "$counters_after" "$elapsed_s")" \
         --argjson ncpu "$(cpu_count)" \
         --argjson strays "$(stray_procs_json "$ps_start" "$ps_end")" \
         --argjson samples "$samples" '
-        {cpus: $ncpu, start: $start, end: $end} + $cpu
-        + {load1_max: ([$start.load[0]?, $end.load[0]?, ($samples[] | .load1)]
+        {cpus: $ncpu, "start": $at_start, "end": $at_end} + $cpu
+        + {load1_max: ([$at_start.load[0]?, $at_end.load[0]?, ($samples[] | .load1)]
                        | map(select(. != null)) | max),
            stray_procs: $strays}'
 }

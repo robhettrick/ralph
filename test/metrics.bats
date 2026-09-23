@@ -278,6 +278,7 @@ MOCK
 #!/usr/bin/env bash
 cat > /dev/null
 nohup sleep 4242 </dev/null >/dev/null 2>&1 3>&- 4>&- 63>&- &
+sleep 2
 echo '{"type":"result","subtype":"success","num_turns":1,"result":"Left one running."}'
 MOCK
     chmod +x "$TEST_DIR/bin/claude"
