@@ -238,3 +238,119 @@ MOCK
     [[ "$output" == *"metrics disabled for this run"* ]]
     [[ "$output" == *"Nothing to do."* ]]
 }
+
+@test "metrics line records system load and the CPU split" {
+    [[ -r /proc/loadavg && -r /proc/stat ]] || skip "needs /proc"
+    "$RALPH" init
+    printf -- '- [ ] one\n' > IMPLEMENTATION_PLAN.md
+    create_noop_backend
+
+    PATH="$TEST_DIR/bin:$PATH" "$RALPH" build -n 1 --skip-push -y
+
+    local line
+    line=$(tail -1 "$(latest_metrics_file)")
+    [[ $(jq -r '.system.start.load | length' <<<"$line") == "3" ]]
+    [[ $(jq -r '.system.end.load | length' <<<"$line") == "3" ]]
+    [[ $(jq -r '.system.cpus' <<<"$line") -ge 1 ]]
+    [[ $(jq -r '.system.host_cpu_pct | type' <<<"$line") =~ ^(number|null)$ ]]
+    [[ $(jq -r '.system.end.containers | type' <<<"$line") == "array" ]]
+}
+
+@test "process list is dumped at the start and end of each iteration" {
+    "$RALPH" init
+    printf -- '- [ ] one\n' > IMPLEMENTATION_PLAN.md
+    create_noop_backend
+
+    PATH="$TEST_DIR/bin:$PATH" "$RALPH" build -n 1 --skip-push -y
+
+    local dir
+    dir=$(dirname "$(latest_metrics_file)")
+    grep -q 'PID' "$dir/iter-001.ps-start.txt"
+    grep -q 'PID' "$dir/iter-001.ps-end.txt"
+    [[ $(tail -1 "$(latest_metrics_file)" | jq -r '.system.stray_procs | length') == "0" ]]
+}
+
+@test "a process the backend leaves running is recorded as a stray" {
+    "$RALPH" init
+    printf -- '- [ ] one\n' > IMPLEMENTATION_PLAN.md
+    mkdir -p "$TEST_DIR/bin"
+    cat > "$TEST_DIR/bin/claude" <<'MOCK'
+#!/usr/bin/env bash
+cat > /dev/null
+nohup sleep 4242 </dev/null >/dev/null 2>&1 3>&- 4>&- 63>&- &
+echo '{"type":"result","subtype":"success","num_turns":1,"result":"Left one running."}'
+MOCK
+    chmod +x "$TEST_DIR/bin/claude"
+
+    PATH="$TEST_DIR/bin:$PATH" "$RALPH" build -n 1 --skip-push -y
+    pkill -f 'sleep 4242' || true
+
+    local line
+    line=$(tail -1 "$(latest_metrics_file)")
+    [[ $(jq -r '[.system.stray_procs[].args] | any(. == "sleep 4242")' <<<"$line") == "true" ]]
+}
+
+@test "the sampler records a line per interval while the backend runs" {
+    "$RALPH" init
+    printf -- '- [ ] one\n' > IMPLEMENTATION_PLAN.md
+    mkdir -p "$TEST_DIR/bin"
+    cat > "$TEST_DIR/bin/claude" <<'MOCK'
+#!/usr/bin/env bash
+cat > /dev/null
+sleep 3
+echo '{"type":"result","subtype":"success","num_turns":1,"result":"Slow."}'
+MOCK
+    chmod +x "$TEST_DIR/bin/claude"
+
+    RALPH_SAMPLE_INTERVAL=1 PATH="$TEST_DIR/bin:$PATH" "$RALPH" build -n 1 --skip-push -y
+
+    local dir samples
+    dir=$(dirname "$(latest_metrics_file)")
+    sleep 2
+    samples=$(wc -l < "$dir/iter-001.samples.jsonl")
+    [[ "$samples" -ge 1 ]]
+    jq -e 'has("load1") and has("host_cpu_pct") and has("top")' < <(head -1 "$dir/iter-001.samples.jsonl")
+    sleep 2
+    [[ $(wc -l < "$dir/iter-001.samples.jsonl") -eq "$samples" ]]
+}
+
+@test "vitest summaries in tool results are recorded as test runs" {
+    "$RALPH" init
+    printf -- '- [ ] one\n' > IMPLEMENTATION_PLAN.md
+    mkdir -p "$TEST_DIR/bin"
+    cat > "$TEST_DIR/bin/claude" <<'MOCK'
+#!/usr/bin/env bash
+cat > /dev/null
+summary=$(printf '\\u001b[2m Test Files \\u001b[22m 1 failed | 226 passed (227)\\n      Tests  2 failed | 4979 passed (4981)\\n   Start at  12:00:00\\n   Duration  265.56s (transform 12.60s, setup 0ms, import 353.48s, tests 377.40s, environment 445ms)')
+echo "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"$summary\"}]}}"
+echo '{"type":"result","subtype":"success","num_turns":1,"result":"Tested."}'
+MOCK
+    chmod +x "$TEST_DIR/bin/claude"
+
+    PATH="$TEST_DIR/bin:$PATH" "$RALPH" build -n 1 --skip-push -y
+
+    local line
+    line=$(tail -1 "$(latest_metrics_file)")
+    [[ $(jq -r '.test_runs | length' <<<"$line") == "1" ]]
+    [[ $(jq -r '.test_runs[0].files_passed' <<<"$line") == "226" ]]
+    [[ $(jq -r '.test_runs[0].files_failed' <<<"$line") == "1" ]]
+    [[ $(jq -r '.test_runs[0].tests_passed' <<<"$line") == "4979" ]]
+    [[ $(jq -r '.test_runs[0].duration_s' <<<"$line") == "265.56" ]]
+    [[ $(jq -r '.test_runs[0].transform_s' <<<"$line") == "12.6" ]]
+    [[ $(jq -r '.test_runs[0].tests_s' <<<"$line") == "377.4" ]]
+}
+
+@test "ralph metrics shows load, CPU split, strays and test durations" {
+    "$RALPH" init
+    printf -- '- [ ] one\n' > IMPLEMENTATION_PLAN.md
+    create_noop_backend
+
+    PATH="$TEST_DIR/bin:$PATH" "$RALPH" build -n 1 --skip-push -y
+
+    run "$RALPH" metrics
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == *"LOAD"* ]]
+    [[ "$output" == *"HOST%/SBX%"* ]]
+    [[ "$output" == *"STRAYS"* ]]
+    [[ "$output" == *"TESTS"* ]]
+}

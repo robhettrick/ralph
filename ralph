@@ -1015,10 +1015,163 @@ iso_utc() {
     date -u -d "@$1" +%FT%TZ 2>/dev/null || date -u -r "$1" +%FT%TZ
 }
 
+SAMPLE_INTERVAL_S="${RALPH_SAMPLE_INTERVAL:-30}"
+
+cpu_counters() {
+    local host="" cgroup=""
+    if [[ -r /proc/stat ]]; then
+        host=$(awk '/^cpu /{t=0; for (i=2; i<=NF; i++) t+=$i; print t-$5-$6, t; exit}' /proc/stat)
+    fi
+    if [[ -r /sys/fs/cgroup/cpu.stat ]]; then
+        cgroup=$(awk '/^usage_usec/{print $2; exit}' /sys/fs/cgroup/cpu.stat)
+    fi
+    echo "${host:-- -} ${cgroup:--}"
+}
+
+cpu_count() {
+    nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1
+}
+
+cpu_pct_json() {
+    local before="$1" after="$2" elapsed_s="$3"
+    local b_busy b_total b_cg a_busy a_total a_cg
+    read -r b_busy b_total b_cg <<<"$before"
+    read -r a_busy a_total a_cg <<<"$after"
+    jq -cn --arg bb "$b_busy" --arg bt "$b_total" --arg bc "$b_cg" \
+        --arg ab "$a_busy" --arg at "$a_total" --arg ac "$a_cg" \
+        --argjson secs "$elapsed_s" --argjson ncpu "$(cpu_count)" '
+        def num: if . == "-" or . == "" then null else tonumber end;
+        ($bb | num) as $bb | ($bt | num) as $bt | ($bc | num) as $bc
+        | ($ab | num) as $ab | ($at | num) as $at | ($ac | num) as $ac
+        | { host_cpu_pct: (if $bt and $at and $at > $bt
+                then (($ab - $bb) * 100 / ($at - $bt) | round) else null end),
+            sandbox_cpu_pct: (if $bc and $ac and $secs > 0
+                then (($ac - $bc) / 10000 / $secs / $ncpu | round) else null end) }'
+}
+
+system_snapshot() {
+    local load="" mem_avail="" swap_used="" on_ac="" containers=""
+    [[ -r /proc/loadavg ]] && load=$(awk '{print $1, $2, $3}' /proc/loadavg)
+    if [[ -r /proc/meminfo ]]; then
+        mem_avail=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)
+        swap_used=$(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{if (t != "") print int((t-f)/1024)}' /proc/meminfo)
+    fi
+    local supply
+    for supply in /sys/class/power_supply/*; do
+        if [[ -r "$supply/type" && "$(cat "$supply/type" 2>/dev/null)" == "Mains" ]]; then
+            on_ac=$(cat "$supply/online" 2>/dev/null)
+            break
+        fi
+    done
+    if command -v docker >/dev/null 2>&1; then
+        containers=$(timeout 5 docker ps --format '{{.Names}}' 2>/dev/null || true)
+    fi
+    jq -cn --arg load "$load" --arg mem "$mem_avail" --arg swap "$swap_used" \
+        --arg ac "$on_ac" --arg containers "$containers" '
+        { load: (if $load == "" then null else ($load | split(" ") | map(tonumber)) end),
+          mem_available_mb: (if $mem == "" then null else ($mem | tonumber) end),
+          swap_used_mb: (if $swap == "" then null else ($swap | tonumber) end),
+          on_ac: (if $ac == "" then null else $ac == "1" end),
+          containers: ($containers | split("\n") | map(select(. != ""))) }'
+}
+
+ps_dump() {
+    ps -eo pid,ppid,etime,pcpu,rss,args > "$1" 2>/dev/null || true
+}
+
+stray_procs_json() {
+    local start_file="$1" end_file="$2"
+    [[ -f "$start_file" && -f "$end_file" ]] || { echo '[]'; return; }
+    awk 'NR == FNR { if (FNR > 1) seen[$1] = 1; next }
+         FNR > 1 && !($1 in seen) {
+             args = ""; for (i = 6; i <= NF; i++) args = args (i > 6 ? " " : "") $i
+             if (args ~ /^ps -eo /) next
+             print $1 "\t" $3 "\t" args
+         }' "$start_file" "$end_file" \
+        | jq -R -s -c 'split("\n") | map(select(. != "") | split("\t")
+            | {pid: (.[0] | tonumber), etime: .[1], args: .[2][0:200]})'
+}
+
+top_procs_json() {
+    { top -b -n 2 -d 0.5 -o %CPU -w 200 2>/dev/null || true; } \
+        | awk '/^top -/{frame++} frame == 2 && hdr && NF >= 12 && n < 3 {
+                   args = ""; for (i = 12; i <= NF; i++) args = args (i > 12 ? " " : "") $i
+                   print $9 "\t" args; n++ }
+               frame == 2 && $1 == "PID" {hdr = 1}' \
+        | jq -R -s -c 'split("\n") | map(select(. != "") | split("\t")
+            | {cpu_pct: (.[0] | tonumber? // null), command: .[1][0:120]})'
+}
+
+start_sampler() {
+    local samples_file="$1"
+    (
+        local parent=$$ prev now
+        trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM
+        prev=$(cpu_counters)
+        while :; do
+            sleep "$SAMPLE_INTERVAL_S" &
+            wait $!
+            kill -0 "$parent" 2>/dev/null || exit 0
+            now=$(cpu_counters)
+            jq -cn --arg t "$(date -u +%FT%TZ)" \
+                --arg load "$(awk '{print $1}' /proc/loadavg 2>/dev/null)" \
+                --argjson cpu "$(cpu_pct_json "$prev" "$now" "$SAMPLE_INTERVAL_S")" \
+                --argjson top "$(top_procs_json)" \
+                '{t: $t, load1: (if $load == "" then null else ($load | tonumber) end)}
+                 + $cpu + {top: $top}' >> "$samples_file" 2>/dev/null || true
+            prev=$now
+        done
+    ) >/dev/null 2>&1 3>&- &
+    echo $!
+}
+
+stop_sampler() {
+    [[ -n "$1" ]] || return 0
+    kill "$1" 2>/dev/null || return 0
+    local tries=0
+    while kill -0 "$1" 2>/dev/null && (( tries < 30 )); do
+        sleep 0.1
+        tries=$((tries + 1))
+    done
+}
+
+system_metrics_json() {
+    local start_snapshot="$1" end_snapshot="$2" counters_before="$3" counters_after="$4"
+    local elapsed_s="$5" ps_start="$6" ps_end="$7" samples_file="$8"
+    local samples='[]'
+    [[ -s "$samples_file" ]] && samples=$(jq -cs '.' "$samples_file" 2>/dev/null || echo '[]')
+    jq -cn --argjson start "$start_snapshot" --argjson end "$end_snapshot" \
+        --argjson cpu "$(cpu_pct_json "$counters_before" "$counters_after" "$elapsed_s")" \
+        --argjson ncpu "$(cpu_count)" \
+        --argjson strays "$(stray_procs_json "$ps_start" "$ps_end")" \
+        --argjson samples "$samples" '
+        {cpus: $ncpu, start: $start, end: $end} + $cpu
+        + {load1_max: ([$start.load[0]?, $end.load[0]?, ($samples[] | .load1)]
+                       | map(select(. != null)) | max),
+           stray_procs: $strays}'
+}
+
+test_runs_json() {
+    local raw_file="$1"
+    jq -cs '
+        def secs: if . == null then null
+            elif endswith("ms") then (.[:-2] | tonumber / 1000 * 1000 | round / 1000)
+            else (rtrimstr("s") | tonumber * 1000 | round / 1000) end;
+        [ .[] | .message.content[]? | select(.type? == "tool_result") | .content
+          | if type == "array" then map(.text? // "") | join("\n") else tostring end
+          | gsub("\u001b\\[[0-9;]*m"; "")
+          | capture("Test Files\\s+(?:(?<ff>\\d+) failed \\| )?(?<fp>\\d+) passed[^\\n]*\\n\\s*Tests\\s+(?:(?<tf>\\d+) failed \\| )?(?<tp>\\d+) passed[\\s\\S]*?Duration\\s+(?<dur>[\\d.]+m?s)(?: \\(transform (?<transform>[\\d.]+m?s), setup [\\d.]+m?s, (?:collect [\\d.]+m?s, )?import (?<import>[\\d.]+m?s), tests (?<tests>[\\d.]+m?s))?"; "g")
+          | { files_passed: (.fp | tonumber), files_failed: ((.ff // "0") | tonumber),
+              tests_passed: (.tp | tonumber), tests_failed: ((.tf // "0") | tonumber),
+              duration_s: (.dur | secs), transform_s: (.transform | secs),
+              import_s: (.import | secs), tests_s: (.tests | secs) } ]
+        | reduce .[] as $run ([]; if any(.[]; . == $run) then . else . + [$run] end)' "$raw_file" 2>/dev/null || echo '[]'
+}
+
 write_iteration_metrics() {
     local metrics_file="$1" raw_file="$2" mode="$3" branch="$4" backend="$5" model="$6"
     local iteration="$7" started="$8" ended="$9" head_before="${10}" head_after="${11}" plan_done_before="${12}"
-    local plan_noop="${13:-}" dirty_before="${14:-}"
+    local plan_noop="${13:-}" dirty_before="${14:-}" system_json="${15:-null}"
 
     local commits=0 stat="" files="" ins="" del="" noop=true
     if [[ "$head_before" != "$head_after" ]]; then
@@ -1093,6 +1246,8 @@ write_iteration_metrics() {
         --argjson insertions "$ins" --argjson deletions "$del" \
         --argjson noop "$noop" --argjson plan_done "$plan_delta" \
         --argjson backend_summary "$backend_summary" \
+        --argjson system "$system_json" \
+        --argjson test_runs "$(test_runs_json "$raw_file")" \
         '{iteration: $iteration, mode: $mode, branch: $branch,
           commit: (if $commit == "" then null else $commit end),
           dirty: (if $dirty == "" then null else $dirty == "true" end),
@@ -1103,7 +1258,8 @@ write_iteration_metrics() {
          + $backend_summary
          + {git: {commits: $commits, files_changed: $files,
                   insertions: $insertions, deletions: $deletions, noop: $noop},
-            plan_items_completed: $plan_done}' >> "$metrics_file"
+            plan_items_completed: $plan_done,
+            system: $system, test_runs: $test_runs}' >> "$metrics_file"
 }
 
 # One-line human summary of the last metrics record (everything after the
@@ -1137,12 +1293,13 @@ cmd_metrics() {
 
     local table
     table=$({
-        printf 'ITER\tWALL\tAPI\tTURNS\tCOST\tTOK_IN\tTOK_OUT\tCACHE_RD\tCOMMITS\t+/-\tPLAN\tTOP_TOOLS\n'
+        printf 'ITER\tWALL\tAPI\tTURNS\tCOST\tTOK_IN\tTOK_OUT\tCACHE_RD\tCOMMITS\t+/-\tPLAN\tLOAD\tHOST%%/SBX%%\tSTRAYS\tTESTS\tTOP_TOOLS\n'
         jq -r '
             def fmtd: if . == null then "-"
               elif . >= 3600 then "\(. / 3600 | floor)h\(. % 3600 / 60 | floor)m"
               elif . >= 60 then "\(. / 60 | floor)m\(. % 60)s"
               else "\(.)s" end;
+            def fmtd_f: round | fmtd;
             [ .iteration,
               (.wall_s | fmtd),
               (.api_s | fmtd),
@@ -1151,6 +1308,11 @@ cmd_metrics() {
               (.tokens.input // "-"), (.tokens.output // "-"), (.tokens.cache_read // "-"),
               .git.commits, "+\(.git.insertions)/-\(.git.deletions)",
               .plan_items_completed,
+              (.system.load1_max // "-"),
+              "\(.system.host_cpu_pct // "-")/\(.system.sandbox_cpu_pct // "-")",
+              ((.system.stray_procs // null) | if . == null then "-" else length end),
+              ((.test_runs // []) | if length == 0 then "-"
+                else map(.duration_s | fmtd_f) | join(",") end),
               ((.tools // {}) | to_entries | sort_by(-.value) | .[0:3]
                 | map("\(.key):\(.value)") | join(" ") | if . == "" then "-" else . end)
             ] | @tsv' "$file"
@@ -1434,7 +1596,7 @@ cmd_loop() {
     local consecutive_noops=0
 
     # Clean exit on interrupt signals
-    trap 'echo -e "\nInterrupted at iteration $iteration / $max_iterations" >&2; exit 130' SIGINT SIGTERM
+    trap 'stop_sampler "${sampler_pid:-}"; echo -e "\nInterrupted at iteration $iteration / $max_iterations" >&2; exit 130' SIGINT SIGTERM
 
     while [[ $iteration -lt $max_iterations ]]; do
         iteration=$((iteration + 1))
@@ -1520,6 +1682,19 @@ cmd_loop() {
                 fi
             fi
 
+            local sys_start="" cpu_before="" ps_start="" ps_end="" samples_file="" sampler_pid=""
+            if $metrics_enabled; then
+                local iter_prefix
+                iter_prefix="$metrics_dir/$(printf 'iter-%03d' "$iteration")"
+                ps_start="$iter_prefix.ps-start.txt"
+                ps_end="$iter_prefix.ps-end.txt"
+                samples_file="$iter_prefix.samples.jsonl"
+                sys_start=$(system_snapshot) || sys_start=null
+                cpu_before=$(cpu_counters)
+                ps_dump "$ps_start"
+                sampler_pid=$(start_sampler "$samples_file")
+            fi
+
             local backend_output="" backend_exit=0
             local retry_num=0
             while true; do
@@ -1583,6 +1758,15 @@ cmd_loop() {
                 sleep "$wait_seconds"
             done
 
+            local sys_end="" cpu_after="" capture_end=""
+            if $metrics_enabled; then
+                stop_sampler "$sampler_pid"
+                cpu_after=$(cpu_counters)
+                capture_end=$(date +%s) || capture_end=$iter_start
+                sys_end=$(system_snapshot) || sys_end=null
+                ps_dump "$ps_end"
+            fi
+
             # Verbose: show raw backend output before jq
             if $verbose; then
                 echo "[verbose] Raw backend output:" >&2
@@ -1631,10 +1815,14 @@ cmd_loop() {
                 raw_file="$metrics_dir/$(printf 'iter-%03d' "$iteration").stream.jsonl"
                 printf '%s\n' "$backend_output" > "$raw_file" 2>/dev/null || true
                 head_after_m=$(git rev-parse HEAD 2>/dev/null) || head_after_m=$head_before
+                local system_json
+                system_json=$(system_metrics_json "$sys_start" "$sys_end" "$cpu_before" "$cpu_after" \
+                    "$((capture_end - iter_start))" "$ps_start" "$ps_end" "$samples_file") || system_json=null
+                [[ -z "$system_json" ]] && system_json=null
                 if write_iteration_metrics "$metrics_file" "$raw_file" "$mode" \
                     "$current_branch" "$BACKEND_NAME" "$model" "$iteration" \
                     "$iter_start" "$iter_end" "$head_before" "$head_after_m" \
-                    "$plan_done_before" "$plan_noop" "$dirty_before"; then
+                    "$plan_done_before" "$plan_noop" "$dirty_before" "$system_json"; then
                     echo ""
                     truncate_line "Metrics: $(fmt_duration $((iter_end - iter_start))) wall$(metrics_summary_suffix "$metrics_file")" "$line_width"
                 else

@@ -66,7 +66,7 @@ MOCK
     mock_date $((FIXTURE_RESET_EPOCH - 120))
     mock_claude_rate_limited_then "echo '{\"type\":\"result\",\"result\":\"done after retry\"}'"
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics
     [[ "$status" -eq 0 ]]
     [[ "$output" == *"Rate limited"* ]]
     [[ "$output" == *"attempt 1/5"* ]]
@@ -80,7 +80,7 @@ MOCK
     mock_date $((FIXTURE_RESET_EPOCH - 120))
     mock_claude_rate_limited_then "echo '{\"type\":\"result\",\"result\":\"done\"}'"
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics
     [[ "$status" -eq 0 ]]
     [[ "$(sed -n '1p' "$TEST_DIR/sleep_calls")" -eq 150 ]]
 }
@@ -91,7 +91,7 @@ MOCK
     mock_date $((FIXTURE_RESET_EPOCH - 21600))
     mock_claude_always_rate_limited 3
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics
     [[ "$status" -eq 3 ]]
     [[ "$output" == *"exceeds maximum allowed wait"* ]]
     [[ ! -f "$TEST_DIR/sleep_calls" ]]
@@ -108,7 +108,7 @@ exit 1
 MOCK
     chmod +x "$TEST_DIR/bin/claude"
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics
     [[ "$status" -eq 1 ]]
     [[ "$output" == *"Did not detect a rate limited error"* ]]
     [[ "$output" != *"Rate limited"* ]]
@@ -126,7 +126,7 @@ exit 1
 MOCK
     chmod +x "$TEST_DIR/bin/claude"
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics
     [[ "$status" -eq 1 ]]
     [[ "$output" == *"usage limit reached"* ]]
     [[ "$output" == *"Did not detect a rate limited error"* ]]
@@ -144,7 +144,7 @@ exit 139
 MOCK
     chmod +x "$TEST_DIR/bin/claude"
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics
     [[ "$status" -eq 139 ]]
     [[ "$output" == *"Did not detect a rate limited error"* ]]
     [[ "$output" != *"parse error"* ]]
@@ -158,7 +158,7 @@ MOCK
     mock_date $((FIXTURE_RESET_EPOCH - 120))
     mock_claude_always_rate_limited
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --max-retries-per-iteration 2
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics --max-retries-per-iteration 2
     [[ "$status" -eq 1 ]]
     [[ "$output" == *"attempt 1/2"* ]]
     [[ "$output" == *"attempt 2/2"* ]]
@@ -172,7 +172,7 @@ MOCK
     mock_date $((FIXTURE_RESET_EPOCH - 120))
     mock_claude_always_rate_limited
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-retry
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics --no-retry
     [[ "$status" -eq 1 ]]
     [[ "$output" != *"⏸"* ]]
     [[ "$output" == *"retries are disabled"* ]]
@@ -185,7 +185,7 @@ MOCK
     mock_date $((FIXTURE_RESET_EPOCH - 120))
     mock_claude_always_rate_limited
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --max-retries-per-iteration 0
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics --max-retries-per-iteration 0
     [[ "$status" -eq 1 ]]
     [[ "$output" == *"retries are disabled"* ]]
     [[ ! -f "$TEST_DIR/sleep_calls" ]]
@@ -198,7 +198,7 @@ MOCK
     mock_claude_rate_limited_then "git commit --allow-empty -m 'work done' --quiet
 echo '{\"type\":\"result\",\"result\":\"done\"}'"
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics
     [[ "$status" -eq 0 ]]
     [[ "$output" == *"Completed 1 iteration"* ]]
     [[ "$(git log --oneline | wc -l)" -eq 2 ]]
@@ -210,7 +210,7 @@ echo '{\"type\":\"result\",\"result\":\"done\"}'"
     mock_date $((FIXTURE_RESET_EPOCH - 120))
     mock_claude_always_rate_limited
 
-    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-retry
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push --no-metrics --no-retry
     [[ "$output" == *"Error: backend command failed on iteration 1 (exit code 1)"* ]]
     [[ "$output" == *"Raw backend output:"* ]]
     [[ "$output" == *"rate_limit_event"* ]]
