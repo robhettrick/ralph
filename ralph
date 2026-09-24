@@ -230,6 +230,11 @@ Options:
                        single iteration, each with a parseable reset time
                        (default: 5)
       --no-retry       Fail immediately on any backend error, no retry
+      --full-suite-every N
+                       Build only: replace {{RUN_FULL_SUITE}} in the prompt with
+                       "yes" on iteration 1 and every Nth after it (1, 1+N,
+                       1+2N...) and "no" on the others (default: "yes" on every
+                       iteration)
   -h, --help           Show this help message
 
 Examples:
@@ -241,6 +246,7 @@ Examples:
   ralph build --iterations 5 --goal "Add PATCH endpoint"
   ralph build --max-retries-per-iteration 3
   ralph build --no-retry
+  ralph build --full-suite-every 4
   ralph review
   ralph review -g "Focus on FT-001 business-rule coverage"
   ralph sandbox
@@ -1171,7 +1177,7 @@ test_runs_json() {
 write_iteration_metrics() {
     local metrics_file="$1" raw_file="$2" mode="$3" branch="$4" backend="$5" model="$6"
     local iteration="$7" started="$8" ended="$9" head_before="${10}" head_after="${11}" plan_done_before="${12}"
-    local plan_noop="${13:-}" dirty_before="${14:-}" system_json="${15:-null}"
+    local plan_noop="${13:-}" dirty_before="${14:-}" system_json="${15:-null}" run_full_suite="${16:-}"
 
     local commits=0 stat="" files="" ins="" del="" noop=true
     if [[ "$head_before" != "$head_after" ]]; then
@@ -1247,6 +1253,7 @@ write_iteration_metrics() {
         --argjson noop "$noop" --argjson plan_done "$plan_delta" \
         --argjson backend_summary "$backend_summary" \
         --argjson system "$system_json" \
+        --arg full_suite "$run_full_suite" \
         --argjson test_runs "$(test_runs_json "$raw_file")" \
         '{iteration: $iteration, mode: $mode, branch: $branch,
           commit: (if $commit == "" then null else $commit end),
@@ -1259,6 +1266,7 @@ write_iteration_metrics() {
          + {git: {commits: $commits, files_changed: $files,
                   insertions: $insertions, deletions: $deletions, noop: $noop},
             plan_items_completed: $plan_done,
+            full_suite: (if $full_suite == "" then null else $full_suite == "yes" end),
             system: $system, test_runs: $test_runs}' >> "$metrics_file"
 }
 
@@ -1365,6 +1373,7 @@ cmd_loop() {
     local no_retry=false
     local stream=false
     local no_metrics=false
+    local full_suite_every=""
 
     # Parsed by hand rather than with getopt(1). BSD getopt, which is what macOS
     # ships, does not understand --long and returns the whole invocation as
@@ -1386,6 +1395,7 @@ cmd_loop() {
             --plan-effort)               require_option_value "$@"; plan_effort="$2";     shift 2 ;;
             -b|--backend)                require_option_value "$@"; backend="$2";         shift 2 ;;
             --max-retries-per-iteration) require_option_value "$@"; max_retries_opt="$2"; shift 2 ;;
+            --full-suite-every)          require_option_value "$@"; full_suite_every="$2"; shift 2 ;;
             --skip-push)     skip_push=true;      shift ;;
             --dry-run)       dry_run=true;        shift ;;
             --no-metrics)    no_metrics=true;     shift ;;
@@ -1423,6 +1433,17 @@ cmd_loop() {
         max_retries=$max_retries_opt
     fi
     $no_retry && max_retries=0
+
+    if [[ -n "$full_suite_every" ]]; then
+        if [[ ! "$full_suite_every" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: --full-suite-every must be a positive integer, got '$full_suite_every'" >&2
+            exit 1
+        fi
+        if [[ "$mode" != "build" ]]; then
+            echo "Error: --full-suite-every applies to 'ralph build' only (this run is '$mode')." >&2
+            exit 1
+        fi
+    fi
 
     # Fail fast if 'ralph init' hasn't been run — checked before any backend
     # resolution, CLI lookup, or git work so the user gets immediate feedback.
@@ -1552,6 +1573,7 @@ cmd_loop() {
     [[ -n "$plan_effort" ]] && echo "Effort:  $plan_effort"
     echo "Max:     $max_iterations iterations"
     [[ -n "$goal" ]] && truncate_line "Goal:    $goal" "$line_width"
+    [[ -n "$full_suite_every" ]] && echo "Suite:   full suite every $full_suite_every iterations"
     $metrics_enabled && truncate_line "Metrics: $metrics_file" "$line_width"
     echo "$bar"
 
@@ -1659,6 +1681,15 @@ cmd_loop() {
         local prompt
         prompt=$(<"$prompt_file")
         prompt="${prompt//\{\{GOAL\}\}/${goal:-No specific goal provided}}"
+        local run_full_suite=yes
+        if [[ -n "$full_suite_every" ]] && (( (iteration - 1) % full_suite_every != 0 )); then
+            run_full_suite=no
+        fi
+        prompt="${prompt//\{\{RUN_FULL_SUITE\}\}/$run_full_suite}"
+        if [[ -n "$full_suite_every" ]]; then
+            echo "Full suite: $run_full_suite"
+            echo ""
+        fi
 
         if $dry_run; then
             if [[ "$BACKEND_STDIN_PROMPT" == "true" ]]; then
@@ -1822,7 +1853,7 @@ cmd_loop() {
                 if write_iteration_metrics "$metrics_file" "$raw_file" "$mode" \
                     "$current_branch" "$BACKEND_NAME" "$model" "$iteration" \
                     "$iter_start" "$iter_end" "$head_before" "$head_after_m" \
-                    "$plan_done_before" "$plan_noop" "$dirty_before" "$system_json"; then
+                    "$plan_done_before" "$plan_noop" "$dirty_before" "$system_json" "$run_full_suite"; then
                     echo ""
                     truncate_line "Metrics: $(fmt_duration $((iter_end - iter_start))) wall$(metrics_summary_suffix "$metrics_file")" "$line_width"
                 else
