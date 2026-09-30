@@ -311,8 +311,34 @@ MOCK
     samples=$(wc -l < "$dir/iter-001.samples.jsonl")
     [[ "$samples" -ge 1 ]]
     jq -e 'has("load1") and has("host_cpu_pct") and has("top")' < <(head -1 "$dir/iter-001.samples.jsonl")
+    jq -e 'has("mem_available_mb") and has("swap_used_mb") and has("swap_in_pages") and has("swap_out_pages")' \
+        < <(head -1 "$dir/iter-001.samples.jsonl")
     sleep 2
     [[ $(wc -l < "$dir/iter-001.samples.jsonl") -eq "$samples" ]]
+}
+
+@test "metrics line summarises memory, swap and the longest gap between samples" {
+    [[ -r /proc/meminfo && -r /proc/vmstat ]] || skip "needs /proc"
+    "$RALPH" init
+    printf -- '- [ ] one\n' > IMPLEMENTATION_PLAN.md
+    mkdir -p "$TEST_DIR/bin"
+    cat > "$TEST_DIR/bin/claude" <<'MOCK'
+#!/usr/bin/env bash
+cat > /dev/null
+sleep 4
+echo '{"type":"result","subtype":"success","num_turns":1,"result":"Slow."}'
+MOCK
+    chmod +x "$TEST_DIR/bin/claude"
+
+    RALPH_SAMPLE_INTERVAL=1 PATH="$TEST_DIR/bin:$PATH" "$RALPH" build -n 1 --skip-push -y
+
+    local line
+    line=$(tail -1 "$(latest_metrics_file)")
+    [[ $(jq -r '.system.mem_available_min_mb | type' <<<"$line") == "number" ]]
+    [[ $(jq -r '.system.swap_used_max_mb | type' <<<"$line") == "number" ]]
+    [[ $(jq -r '.system.swap_in_pages | type' <<<"$line") == "number" ]]
+    [[ $(jq -r '.system.swap_out_pages | type' <<<"$line") == "number" ]]
+    [[ $(jq -r '.system.sample_gap_max_s' <<<"$line") -ge 1 ]]
 }
 
 @test "vitest summaries in tool results are recorded as test runs" {

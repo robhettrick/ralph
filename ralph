@@ -231,10 +231,10 @@ Options:
                        (default: 5)
       --no-retry       Fail immediately on any backend error, no retry
       --full-suite-every N
-                       Build only: replace {{RUN_FULL_SUITE}} in the prompt with
-                       "yes" on iteration 1 and every Nth after it (1, 1+N,
-                       1+2N...) and "no" on the others (default: "yes" on every
-                       iteration)
+                       Build only: replace {{TEST_SCOPE}} in the prompt with
+                       "full" on every Nth iteration (N, 2N, 3N...) and on the
+                       last, and "targeted" on the others (default: "full" on
+                       every iteration)
   -h, --help           Show this help message
 
 Examples:
@@ -1055,6 +1055,28 @@ cpu_pct_json() {
                 then (($ac - $bc) / 10000 / $secs / $ncpu | round) else null end) }'
 }
 
+swap_counters() {
+    awk '/^pswpin /{i=$2} /^pswpout /{o=$2} END{print (i == "" ? "-" : i), (o == "" ? "-" : o)}' \
+        /proc/vmstat 2>/dev/null || echo "- -"
+}
+
+mem_json() {
+    local before="$1" after="$2" mem="" swap=""
+    local b_in b_out a_in a_out
+    read -r b_in b_out <<<"$before"
+    read -r a_in a_out <<<"$after"
+    if [[ -r /proc/meminfo ]]; then
+        mem=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo)
+        swap=$(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{if (t != "") print int((t-f)/1024)}' /proc/meminfo)
+    fi
+    jq -cn --arg mem "$mem" --arg swap "$swap" \
+        --arg bi "$b_in" --arg bo "$b_out" --arg ai "$a_in" --arg ao "$a_out" '
+        def num: if . == "-" or . == "" or . == null then null else tonumber end;
+        def delta($b; $a): if ($b | num) and ($a | num) then (($a | num) - ($b | num)) else null end;
+        { mem_available_mb: ($mem | num), swap_used_mb: ($swap | num),
+          swap_in_pages: delta($bi; $ai), swap_out_pages: delta($bo; $ao) }'
+}
+
 system_snapshot() {
     local load="" mem_avail="" swap_used="" on_ac="" containers=""
     [[ -r /proc/loadavg ]] && load=$(awk '{print $1, $2, $3}' /proc/loadavg)
@@ -1111,21 +1133,25 @@ top_procs_json() {
 start_sampler() {
     local samples_file="$1"
     (
-        local parent=$$ prev now
+        local parent=$$ prev now swap_prev swap_now
         trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM
         prev=$(cpu_counters)
+        swap_prev=$(swap_counters)
         while :; do
             sleep "$SAMPLE_INTERVAL_S" &
             wait $!
             kill -0 "$parent" 2>/dev/null || exit 0
             now=$(cpu_counters)
+            swap_now=$(swap_counters)
             jq -cn --arg t "$(date -u +%FT%TZ)" \
                 --arg load "$(awk '{print $1}' /proc/loadavg 2>/dev/null)" \
                 --argjson cpu "$(cpu_pct_json "$prev" "$now" "$SAMPLE_INTERVAL_S")" \
+                --argjson mem "$(mem_json "$swap_prev" "$swap_now")" \
                 --argjson top "$(top_procs_json)" \
                 '{t: $t, load1: (if $load == "" then null else ($load | tonumber) end)}
-                 + $cpu + {top: $top}' >> "$samples_file" 2>/dev/null || true
+                 + $cpu + $mem + {top: $top}' >> "$samples_file" 2>/dev/null || true
             prev=$now
+            swap_prev=$swap_now
         done
     ) >/dev/null 2>&1 3>&- &
     echo $!
@@ -1154,6 +1180,17 @@ system_metrics_json() {
         {cpus: $ncpu, "start": $at_start, "end": $at_end} + $cpu
         + {load1_max: ([$at_start.load[0]?, $at_end.load[0]?, ($samples[] | .load1)]
                        | map(select(. != null)) | max),
+           mem_available_min_mb: ([$at_start.mem_available_mb?, $at_end.mem_available_mb?,
+                                   ($samples[] | .mem_available_mb?)] | map(select(. != null)) | min),
+           swap_used_max_mb: ([$at_start.swap_used_mb?, $at_end.swap_used_mb?,
+                               ($samples[] | .swap_used_mb?)] | map(select(. != null)) | max),
+           swap_in_pages: ([$samples[] | .swap_in_pages? | select(. != null)]
+                           | if length == 0 then null else add end),
+           swap_out_pages: ([$samples[] | .swap_out_pages? | select(. != null)]
+                            | if length == 0 then null else add end),
+           sample_gap_max_s: ([$samples[] | .t? | select(. != null) | fromdateiso8601]
+                              | if length < 2 then null
+                                else [range(1; length) as $i | .[$i] - .[$i - 1]] | max end),
            stray_procs: $strays}'
 }
 
@@ -1177,7 +1214,7 @@ test_runs_json() {
 write_iteration_metrics() {
     local metrics_file="$1" raw_file="$2" mode="$3" branch="$4" backend="$5" model="$6"
     local iteration="$7" started="$8" ended="$9" head_before="${10}" head_after="${11}" plan_done_before="${12}"
-    local plan_noop="${13:-}" dirty_before="${14:-}" system_json="${15:-null}" run_full_suite="${16:-}"
+    local plan_noop="${13:-}" dirty_before="${14:-}" system_json="${15:-null}" test_scope="${16:-}"
 
     local commits=0 stat="" files="" ins="" del="" noop=true
     if [[ "$head_before" != "$head_after" ]]; then
@@ -1253,7 +1290,7 @@ write_iteration_metrics() {
         --argjson noop "$noop" --argjson plan_done "$plan_delta" \
         --argjson backend_summary "$backend_summary" \
         --argjson system "$system_json" \
-        --arg full_suite "$run_full_suite" \
+        --arg test_scope "$test_scope" \
         --argjson test_runs "$(test_runs_json "$raw_file")" \
         '{iteration: $iteration, mode: $mode, branch: $branch,
           commit: (if $commit == "" then null else $commit end),
@@ -1266,7 +1303,7 @@ write_iteration_metrics() {
          + {git: {commits: $commits, files_changed: $files,
                   insertions: $insertions, deletions: $deletions, noop: $noop},
             plan_items_completed: $plan_done,
-            full_suite: (if $full_suite == "" then null else $full_suite == "yes" end),
+            full_suite: (if $test_scope == "" then null else $test_scope == "full" end),
             system: $system, test_runs: $test_runs}' >> "$metrics_file"
 }
 
@@ -1681,13 +1718,13 @@ cmd_loop() {
         local prompt
         prompt=$(<"$prompt_file")
         prompt="${prompt//\{\{GOAL\}\}/${goal:-No specific goal provided}}"
-        local run_full_suite=yes
-        if [[ -n "$full_suite_every" ]] && (( (iteration - 1) % full_suite_every != 0 )); then
-            run_full_suite=no
+        local test_scope=full
+        if [[ -n "$full_suite_every" ]] && (( iteration % full_suite_every != 0 && iteration != max_iterations )); then
+            test_scope=targeted
         fi
-        prompt="${prompt//\{\{RUN_FULL_SUITE\}\}/$run_full_suite}"
+        prompt="${prompt//\{\{TEST_SCOPE\}\}/$test_scope}"
         if [[ -n "$full_suite_every" ]]; then
-            echo "Full suite: $run_full_suite"
+            echo "Test scope: $test_scope"
             echo ""
         fi
 
@@ -1853,7 +1890,7 @@ cmd_loop() {
                 if write_iteration_metrics "$metrics_file" "$raw_file" "$mode" \
                     "$current_branch" "$BACKEND_NAME" "$model" "$iteration" \
                     "$iter_start" "$iter_end" "$head_before" "$head_after_m" \
-                    "$plan_done_before" "$plan_noop" "$dirty_before" "$system_json" "$run_full_suite"; then
+                    "$plan_done_before" "$plan_noop" "$dirty_before" "$system_json" "$test_scope"; then
                     echo ""
                     truncate_line "Metrics: $(fmt_duration $((iter_end - iter_start))) wall$(metrics_summary_suffix "$metrics_file")" "$line_width"
                 else
