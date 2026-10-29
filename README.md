@@ -50,6 +50,7 @@ This places `ralph` in `~/.local/bin/`, default prompts in `~/.config/ralph/prom
 | `--skip-push`        | Don't push after each build iteration (plan and review never push) |
 | `--dry-run`          | Print what would be executed without running              |
 | `--no-metrics`       | Don't record per-iteration metrics under `.ralph/metrics/` |
+| `--full-tests-every` | Build only: run every test suite on each Nth iteration and on the last one (default: 10; `1` runs them every iteration). The iterations between run only the tests their own change reaches. The agent is told which through `{{TEST_SCOPE}}` in the build prompt |
 | `-h`, `--help`       | Show help                                                |
 
 ### Review
@@ -381,6 +382,7 @@ Ralph runs backends in non-interactive pipe mode, which cannot prompt for tool a
 |--------------------|----------------------|---------------------------------|
 | `RALPH_BIN_DIR`    | `~/.local/bin`       | Where to install the CLI        |
 | `RALPH_CONFIG_DIR` | `~/.config/ralph`    | Where to store prompts and container config |
+| `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_TIMEOUT_MS` | `2700000` (45 min) | Claude backend only: how long one shell command may run. Claude Code's own limit is 10 minutes. A suite that outruns it gets started in the background, and a headless session that ends its turn to wait for it loses the run |
 
 ### Model selection
 

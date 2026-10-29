@@ -15,6 +15,6 @@ Each entry must follow this structure exactly:
 **Files changed:**
 - `path/to/file` — brief reason
 
-**Test timings:** measured wall-clock seconds for each suite or gate you ran, naming each one separately, e.g. `unit <package> 41s (327 tests); e2e smoke 96s; e2e full not run`. `not run` for one this iteration skipped, `not timed` for one that went unmeasured. Never an estimate, and never run a suite solely to fill this field.
+**Test timings:** the iteration's test scope (`full` or `targeted`), then measured wall-clock seconds for each suite or gate you ran, naming each one separately, e.g. `targeted: unit <package> 41s (3 files, 27 tests); e2e smoke 96s; e2e full not run`. `not run` for one this iteration skipped, `not timed` for one that went unmeasured. Never an estimate, and never run a suite solely to fill this field.
 
 ---

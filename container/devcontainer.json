@@ -12,7 +12,8 @@
   "remoteUser": "node",
   "updateRemoteUserUID": true,
   "runArgs": [
-    "--network=host"
+    "--network=host",
+    "--tmpfs=/tmp:size=2g,mode=1777"
   ],
   "containerEnv": {
     "DEVCONTAINER": "true",

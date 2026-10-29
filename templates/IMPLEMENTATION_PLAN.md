@@ -80,10 +80,17 @@ Task file rules:
 
 - The spec states what to build. The task file states how to build it.
 - Cite a spec file plus an item number or a section name in `Spec`.
-- Write at most 150 words per task file, excluding the completion notes.
+- Write at most 220 words per task file, excluding the completion notes.
 - Write at most 2 sentences for `Scope`. Write at most 2 sentences for `Done when`.
-- Write at most 8 steps. Write one action per step. Write at most 20 words per step.
-- Split any item that needs a ninth step. That item is too large for one iteration.
+- Write at most 12 steps. Write one action per step. Write at most 20 words per step.
+- Split any item that needs a thirteenth step. That item is too large for one iteration.
+- **Do not split an item that a single sitting would finish.** An item is one
+  coherent change: a component and the test that proves it, a screen with its
+  validation, an object built with the fields it needs. Several items that open
+  the same file in sequence, each adding one field or one branch, are one item
+  written as many — each pays the cost of re-opening the work, and none is
+  separately verifiable. Prefer the largest item that still fits twelve steps
+  and one `Done when`.
 - Name symbols, option paths, literal values, and files to copy an idiom from.
 - Never cite line numbers. Never paste code. Every named token must be greppable.
 - List paths only in `Files`.
