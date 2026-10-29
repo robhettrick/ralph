@@ -664,8 +664,10 @@ cmd_sandbox() {
         # — bake the PID into the trap command as a literal (double-quoted, so it
         # expands now) rather than referencing the variable name.
         if [[ -n "$sleep_inhibitor_pid" ]]; then
+            # `|| true` because the inhibitor may already be gone, and under
+            # `set -e` a failed kill in the trap turns a clean exit into status 1.
             # shellcheck disable=SC2064 # intentional: expand the PID now, before it goes out of scope
-            trap "kill $sleep_inhibitor_pid 2>/dev/null" EXIT
+            trap "kill $sleep_inhibitor_pid 2>/dev/null || true" EXIT
         fi
     fi
 

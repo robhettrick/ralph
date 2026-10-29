@@ -130,6 +130,15 @@ setup_sandbox_mock() {
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "$DEVCONTAINER_CALL_LOG"
 printf -- '---\n' >> "$DEVCONTAINER_CALL_LOG"
+# Sleep-inhibitor tests: hold the session open until the backgrounded mock
+# inhibitor has logged its start. Returning at once lets ralph's EXIT trap
+# kill the inhibitor before its bash has run a single line.
+if [[ -n "${MOCK_DEVCONTAINER_WAIT_FOR:-}" ]]; then
+    for _ in {1..50}; do
+        [[ -s "$MOCK_DEVCONTAINER_WAIT_FOR" ]] && break
+        sleep 0.1
+    done
+fi
 # Validate --mount values like the real CLI: only type/source/target (and an
 # optional external) keys are accepted. Catches unsupported keys (e.g. readonly)
 # that the real devcontainer up would reject.
@@ -564,20 +573,21 @@ MKDIREOF
 
 # ─── sleep inhibitor tests ──────────────────────────────────────────────────
 # Mock caffeinate/systemd-inhibit as long-running processes that log "started"
-# immediately and "killed" when they receive SIGTERM — mirroring how cmd_sandbox
-# actually stops them (kill "$sleep_inhibitor_pid" in the EXIT trap). Backgrounding
-# `sleep infinity` and trapping on the explicit `wait` builtin (rather than a
-# synchronous foreground sleep) makes the mock respond to SIGTERM immediately
-# instead of only after its next command completes.
+# once their TERM trap is in place and "killed" when they receive SIGTERM —
+# mirroring how cmd_sandbox actually stops them (kill "$sleep_inhibitor_pid" in
+# the EXIT trap). Backgrounding a long sleep (not `sleep infinity`, which
+# BSD/macOS sleep rejects) and trapping on the explicit `wait` builtin (rather
+# than a synchronous foreground sleep) makes the mock respond to SIGTERM
+# immediately instead of only after its next command completes.
 write_inhibitor_mock() {
     local path="$1"
     local log="$2"
     cat > "$path" << MOCKEOF
 #!/usr/bin/env bash
-echo "started \$*" >> "$log"
-sleep infinity &
-child=\$!
 trap 'echo "killed" >> "$log"; kill "\$child" 2>/dev/null; exit 0' TERM
+sleep 86400 &
+child=\$!
+echo "started \$*" >> "$log"
 wait "\$child"
 MOCKEOF
     chmod +x "$path"
@@ -589,7 +599,7 @@ MOCKEOF
     local mock_bin="$TEST_DIR/mock-bin"
     local log="$TEST_DIR/caffeinate.log"
     write_inhibitor_mock "$mock_bin/caffeinate" "$log"
-    run "$RALPH" sandbox
+    MOCK_DEVCONTAINER_WAIT_FOR="$log" run "$RALPH" sandbox
     [[ "$status" -eq 0 ]]
     grep -q "^started -dimsu -w [0-9]" "$log"
     grep -q "^killed$" "$log"
@@ -601,10 +611,25 @@ MOCKEOF
     local mock_bin="$TEST_DIR/mock-bin"
     local log="$TEST_DIR/systemd-inhibit.log"
     write_inhibitor_mock "$mock_bin/systemd-inhibit" "$log"
-    run "$RALPH" sandbox
+    MOCK_DEVCONTAINER_WAIT_FOR="$log" run "$RALPH" sandbox
     [[ "$status" -eq 0 ]]
     grep -q "^started --what=idle:sleep" "$log"
     grep -q "^killed$" "$log"
+}
+
+@test "sandbox exits 0 when the sleep inhibitor has already exited" {
+    setup_sandbox_mock
+    local mock_bin="$TEST_DIR/mock-bin"
+    local log="$TEST_DIR/caffeinate.log"
+    # Logs and exits at once, so the EXIT trap's kill targets a dead PID. Under
+    # `set -e` an unguarded failed kill would turn the session's exit into 1.
+    cat > "$mock_bin/caffeinate" << MOCKEOF
+#!/usr/bin/env bash
+echo "started \$*" >> "$log"
+MOCKEOF
+    chmod +x "$mock_bin/caffeinate"
+    MOCK_DEVCONTAINER_WAIT_FOR="$log" run "$RALPH" sandbox
+    [[ "$status" -eq 0 ]]
 }
 
 @test "sandbox warns when no sleep inhibitor is available" {
