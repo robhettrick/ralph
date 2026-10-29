@@ -44,11 +44,17 @@ backend_claude() {
     BACKEND_STDIN_PROMPT=true
     # shellcheck disable=SC2317,SC2329  # Invoked indirectly via resolve_backend
     build_backend_cmd() {
-        local model="$1"
+        local model="$1" effort="${2:-}"
         # Emits one JSON event per line as work happens, so --stream can render a
         # live activity log; the other backends return one blob at the end.
         BACKEND_STREAMS_EVENTS=true
         BACKEND_CMD=(claude -p "$BACKEND_PERMISSION_FLAG" --output-format=stream-json --model "$model" --verbose)
+        # Only Claude takes --effort; the other backends ignore the argument.
+        # Written as if/fi, not `[[ ]] &&`: as the function's last statement a
+        # false test would return non-zero and trip the caller's errexit.
+        if [[ -n "$effort" ]]; then
+            BACKEND_CMD+=(--effort "$effort")
+        fi
     }
 }
 
@@ -207,6 +213,9 @@ Options:
                        never disables the convergence exit
   -g, --goal TEXT      Goal to inject into the prompt template
   -m, --model MODEL    Model to use (default depends on backend)
+      --plan-effort LEVEL  Reasoning effort for 'ralph plan': low, medium, high,
+                       xhigh, max. Claude backend only; planning is one-shot, so
+                       depth pays there in a way it does not in the build loop
   -b, --backend NAME   Backend to use: claude, codex, copilot, pi (default: claude)
       --skip-push      Don't push after each build iteration (plan never pushes)
       --dry-run        Print what would be executed without running
@@ -1067,11 +1076,16 @@ write_iteration_metrics() {
     local head_commit
     head_commit=$(git rev-parse --short "$head_before" 2>/dev/null || true)
 
+    # Read from cmd_loop's scope rather than as a 15th positional: the call site
+    # already passes 14 in order, and one more is a misalignment waiting to happen.
+    # Empty on build/review runs and on backends without the flag, and stored as
+    # null there so a query can tell "not applicable" from a real level.
     jq -cn \
         --argjson iteration "$iteration" \
         --arg mode "$mode" --arg branch "$branch" \
         --arg commit "$head_commit" --arg dirty "$dirty_before" \
         --arg backend "$backend" --arg model "$model" \
+        --arg effort "${plan_effort:-}" \
         --arg started "$(iso_utc "$started")" \
         --arg ended "$(iso_utc "$ended")" \
         --argjson wall_s "$(( ended - started ))" \
@@ -1083,7 +1097,9 @@ write_iteration_metrics() {
           commit: (if $commit == "" then null else $commit end),
           dirty: (if $dirty == "" then null else $dirty == "true" end),
           backend: $backend,
-          model: $model, started: $started, ended: $ended, wall_s: $wall_s}
+          model: $model,
+          effort: (if $effort == "" then null else $effort end),
+          started: $started, ended: $ended, wall_s: $wall_s}
          + $backend_summary
          + {git: {commits: $commits, files_changed: $files,
                   insertions: $insertions, deletions: $deletions, noop: $noop},
@@ -1174,6 +1190,10 @@ cmd_loop() {
     local max_iterations=""
     local goal=""
     local model=""
+    # Planning is the one-shot step where reasoning depth compounds; the build
+    # loop gets its correction from test feedback instead, so effort is not
+    # applied there. Claude-only — other backends have no equivalent flag.
+    local plan_effort=""
     local backend=""
     local skip_push=false
     local dry_run=false
@@ -1201,6 +1221,7 @@ cmd_loop() {
             -n|--iterations)             require_option_value "$@"; max_iterations="$2";  shift 2 ;;
             -g|--goal)                   require_option_value "$@"; goal="$2";            shift 2 ;;
             -m|--model)                  require_option_value "$@"; model="$2";           shift 2 ;;
+            --plan-effort)               require_option_value "$@"; plan_effort="$2";     shift 2 ;;
             -b|--backend)                require_option_value "$@"; backend="$2";         shift 2 ;;
             --max-retries-per-iteration) require_option_value "$@"; max_retries_opt="$2"; shift 2 ;;
             --skip-push)     skip_push=true;      shift ;;
@@ -1286,7 +1307,47 @@ cmd_loop() {
     current_branch=$(git branch --show-current)
 
     # Build the backend command array now that model is resolved
-    build_backend_cmd "$model"
+    if [[ -n "$plan_effort" ]]; then
+        case "$plan_effort" in
+            low|medium|high|xhigh|max) ;;
+            *) echo "Error: invalid --plan-effort '$plan_effort'. Valid levels: low, medium, high, xhigh, max." >&2; exit 1 ;;
+        esac
+        if [[ "$BACKEND_NAME" != "claude" ]]; then
+            echo "Error: --plan-effort is only supported by the claude backend (this run uses '$BACKEND_NAME')." >&2
+            exit 1
+        fi
+        if [[ "$mode" != "plan" ]]; then
+            echo "Error: --plan-effort applies to 'ralph plan' only (this run is '$mode')." >&2
+            exit 1
+        fi
+    fi
+
+    if [[ "$mode" == "plan" ]]; then
+        build_backend_cmd "$model" "$plan_effort"
+    else
+        build_backend_cmd "$model"
+    fi
+
+    # Record what produced the plan, so a plan read months later says which
+    # model and effort wrote it. Written by ralph rather than by the agent:
+    # the template fixes the file at three headings and forbids the agent
+    # adding more, and a deterministic stamp cannot drift or be forgotten.
+    stamp_plan_provenance() {
+        local file="IMPLEMENTATION_PLAN.md" line
+        [[ -f "$file" ]] || return 0
+        line="_Planned by \`$BACKEND_NAME\` model \`$model\`"
+        [[ -n "$plan_effort" ]] && line+=", effort \`$plan_effort\`"
+        line+=" on $(date -u '+%Y-%m-%d')._"
+        if grep -qE '^_Planned by ' "$file"; then
+            # Re-planning replaces the stamp rather than accumulating them.
+            awk -v repl="$line" '!done && /^_Planned by /{print repl; done=1; next} {print}' \
+                "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        else
+            # Insert after the title, before the bolded summary line.
+            awk -v repl="$line" '!done && NR>1 && /^\*\*/{print repl; print ""; done=1} {print}' \
+                "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        fi
+    }
 
     # --stream renders a live activity log, but only backends that emit
     # per-event JSON have anything to render. Say so at startup rather than
@@ -1324,6 +1385,9 @@ cmd_loop() {
     truncate_line "Prompt:  $prompt_file" "$line_width"
     echo "Branch:  $current_branch"
     echo "Model:   $model"
+    # Only shown when set: it applies to plan runs on the claude backend, so a
+    # blank line on every other run would be noise.
+    [[ -n "$plan_effort" ]] && echo "Effort:  $plan_effort"
     echo "Max:     $max_iterations iterations"
     [[ -n "$goal" ]] && truncate_line "Goal:    $goal" "$line_width"
     $metrics_enabled && truncate_line "Metrics: $metrics_file" "$line_width"
@@ -1649,6 +1713,10 @@ cmd_loop() {
             fi
         fi
     done
+
+    if [[ "$mode" == "plan" ]] && ! $dry_run; then
+        stamp_plan_provenance
+    fi
 
     echo -e "\nCompleted $iteration iterations."
     if $metrics_enabled && [[ -s "$metrics_file" ]]; then
