@@ -49,10 +49,26 @@ If no `- [ ]` item exists, change nothing, commit nothing, and report `no open i
 
 ## Phase 3: Verify
 
-Run the project's test suite to validate your changes.
+Run the project's tests to validate your changes.
 
+**Test scope for this iteration: {{TEST_SCOPE}}**
+
+The loop sets the scope. Only each Nth iteration and the last one run every suite, so most iterations run fewer tests and finish sooner.
+
+- **Targeted:** run the tests this iteration added or changed, and the existing tests that cover the code it changed. Run no other tests. Find them from the diff (`git status --short`): the test files touched, and the tests beside or importing each source file touched. A runner that selects by change can do this for you, e.g. `vitest run --changed`, `jest --findRelatedTests <files>`, `pytest <paths>`. Do not run a whole suite "to be sure": the next full iteration is the regression check. Record in `PROGRESS.md` which tests you ran.
+- **Full:** do the targeted run while you work. When the item is otherwise finished, run every suite the project has, including any slow suite behind a fast one (end-to-end behind unit, say), as the regression check. A failure there is this iteration's to fix even when an earlier iteration caused it (see below).
+
+- **Run every test command in the foreground, and wait for it to finish.** This loop runs headless. When you end your turn the session ends, and anything still running is killed and never reported. So never start a suite in the background, never hand it to a monitor to report later, and never end your turn while a command is still running. An iteration that ends waiting for its tests commits nothing. A slow suite is fine in the foreground: under the claude backend one command may run for 45 minutes, so give it a `timeout` long enough for the whole suite.
 - **Keep test output out of your context.** Run suites through a quiet reporter and/or pipe to `tail -30` (e.g. `npm test 2>&1 | tail -30`); read the full log only when diagnosing a failure it names. Accumulated test output is what fills the context window mid-item.
-- **Don't re-run the full suite after every change.** While iterating, run only the narrowest tests covering the code you touched; run the full suite once, when you believe the item is complete.
+- **Don't re-run tests after every change.** While iterating, run only the narrowest tests covering the code you touched; widen to the scope above once, when you believe the item is complete.
+- **When a test fails, narrow before you fix.** Re-run only the failing test — most
+  runners take a file path or a name filter — and keep re-running just that while you
+  work on it. Widen one rung at a time only once it passes: its file, then its package or
+  module, and no wider than this iteration's test scope. Re-running everything on each
+  attempt pays the whole suite's cost for one test's answer, and buries the failure you
+  are reading in output from tests that already pass. Where a project has a slow suite
+  behind a fast one — end-to-end behind unit, say — the slow one runs when the item is
+  otherwise finished, not on each attempt; the project's own rules set that cadence.
 - If tests fail, reason about the root cause with your strongest reasoning model before attempting fixes
 - If tests unrelated to your work fail, resolve them as part of this increment. This overrides the item's `Scope`, because a red suite blocks every later iteration
 - If functionality is missing, add it per the specifications
@@ -73,7 +89,7 @@ Tests must stay green throughout: if a simplification breaks a test, revert the 
 1. Close out the item. **The plan is immutable in this phase**, apart from the edits named here: tick a checkbox, mark an entry `- [~]` per Phase 2, append a new item, and fill in the finished item's completion notes.
    - **`IMPLEMENTATION_PLAN.md`** — flip the entry to `- [x]` and leave the rest of the line exactly as it is. **Never edit an existing entry's text**, never add a field or a note to one, and **never move an entry** — appended entries go at the end of the list, even when they seem urgent. **No completion notes in the index**: it is a queue every future iteration re-reads in full, so it stays one line per item.
    - **Its task file** (`plan/NNN-*.md`) — set `**Status:**` to `Done` and fill in the **Completion notes** section: what shipped, test counts, and any deviation with its tracking reference (e.g. an `OPEN_QUESTIONS.md` id). **Keep it to 3 lines** so a later targeted read stays cheap; the narrative, evidence and reasoning belong in `PROGRESS.md` (step 2). Change no other field of the task file, and no other task file.
-   - **Never delete an entry or its task file.** The plan is an append-only ledger: completed items stay as a record of what shipped. You may **append** new items — a new task file plus its index entry — if this iteration surfaced follow-up work, but do not remove or rewrite existing ones. An appended item follows the same format and limits as every other: copy the shape of an existing task file under `plan/`, at most 150 words, at most 8 steps.
+   - **Never delete an entry or its task file.** The plan is an append-only ledger: completed items stay as a record of what shipped. You may **append** new items — a new task file plus its index entry — if this iteration surfaced follow-up work, but do not remove or rewrite existing ones. An appended item follows the same format and limits as every other: copy the shape of an existing task file under `plan/`, at most 220 words, at most 12 steps.
    - **Never add a `##` heading** to `IMPLEMENTATION_PLAN.md`, and never touch its `## Entry Format` section — it documents the format, and only `## Items` is yours to edit.
 2. Append an entry to `PROGRESS.md` following the template defined in its header (append-only — never edit previous entries)
 3. Record what you learned in `LEARNINGS.md`. **This file is not append-only** — it is a deduplicated summary you edit in place. Where an existing line already covers the point, sharpen that line instead of adding another. Correct anything this iteration proved wrong, and delete what is no longer true. Add nothing that is already obvious from the source, and keep the file inside the size bound stated in its header. If you learned nothing durable, leave the file alone

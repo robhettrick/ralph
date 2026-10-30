@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # full history so merge-base works
           ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', inputs.pr_number) }}
@@ -57,11 +57,11 @@ jobs:
       # Adjust per repo; keep it cheap.
       - name: Install bats
         run: which bats || sudo apt-get update -qq && sudo apt-get install -y -qq bats
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: hashFiles('.nvmrc') != ''
         with:
           node-version-file: .nvmrc
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: hashFiles('.nvmrc') == ''
         with:
           node-version: lts/*
@@ -148,7 +148,7 @@ jobs:
         run: bash .github/claude/post_review.sh "$GITHUB_REPOSITORY" "${{ steps.ctx.outputs.pr }}" .claude-review/review.json
 
       # Everything Claude found, including what was filtered, kept for 14 days.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: claude-review-${{ steps.ctx.outputs.pr }}-${{ github.run_attempt }}
