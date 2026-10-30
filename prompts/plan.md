@@ -31,8 +31,27 @@ Look for:
 - TODOs, placeholders, and minimal/stub implementations
 - Skipped or flaky tests
 - Inconsistent patterns across the codebase
-- Over-engineering: speculative abstraction or configurability no spec asks for, single-caller indirection, several patterns solving the same concern — simplification work belongs in the plan as first-class items
+- Over-engineering: speculative abstraction or configurability no spec asks for, single-caller indirection, several patterns solving the same concern
 - Missing elements needed to achieve the goal
+
+### The plan serves the goal, and remediation is capped
+
+**Items that implement the goal are unlimited. Everything else is capped at
+three per run.** Remediation is any item not required by the spec or specs the
+goal names — cleanup, simplification, dead code, rule breaches in existing code,
+consistency work, retrofits to features already shipped.
+
+Pick the three by what they would cost if left: something that will be built on
+wrongly, or that makes the goal's own work harder, beats tidiness. Write the
+rest to `BACKLOG.md` as one line each — title, one sentence, and where it is —
+creating the file if it does not exist. Never write them as plan items, and
+never carry a backlog entry into the plan on a later run unless it has become a
+blocker or the goal now covers it.
+
+This cap exists because the planner re-reads the whole codebase every run, so
+the surface it can audit grows with every feature shipped. Uncapped, a plan for
+one feature fills with work for features already built, and the queue stops
+converging. A backlog keeps the finding without letting it displace the goal.
 
 **Never assume something is missing.** Confirm with a code search before flagging it. A confirmed gap between a spec and the code becomes a plan item. Work that no spec covers needs a spec first: author one at `specs/FILENAME.md`, then write items to implement it.
 
@@ -102,10 +121,17 @@ Criterion the agent can check without a human.
 _Left empty for the build agent._
 ```
 
-- Write at most 150 words per task file, excluding the completion notes. Write at most 10 words per title.
+- Write at most 220 words per task file, excluding the completion notes. Write at most 10 words per title.
 - Write at most 2 sentences for `Scope`. Write at most 2 sentences for `Done when`.
-- Write at most 8 steps. Write one action per step. Write at most 20 words per step.
-- Split any item that needs a ninth step. That item is too large for one build iteration.
+- Write at most 12 steps. Write one action per step. Write at most 20 words per step.
+- Split any item that needs a thirteenth step. That item is too large for one iteration.
+- **Do not split an item that a single sitting would finish.** An item is one
+  coherent change: a component and the test that proves it, a screen with its
+  validation, an object built with the fields it needs. Several items that open
+  the same file in sequence, each adding one field or one branch, are one item
+  written as many — each pays the cost of re-opening the work, and none is
+  separately verifiable. Prefer the largest item that still fits twelve steps
+  and one `Done when`.
 - `Steps` carry the how. Name symbols, option paths, attribute names, literal values, and files to copy an idiom from.
 - **Never cite line numbers. Never paste code.** Every named token must be greppable, because the item runs many commits after you write it.
 - `Files` lists paths only.

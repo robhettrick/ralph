@@ -111,3 +111,35 @@ load test_helper
     [[ "$status" -ne 0 ]]
     [[ "$output" == *"Supported backends:"*"pi"* ]]
 }
+
+# --- Command time limit under claude ---
+
+# A mock claude that records the time limits it was started with, then fails
+# so the loop stops after one call.
+mock_claude_recording_timeouts() {
+    mkdir -p "$TEST_DIR/bin"
+    cat > "$TEST_DIR/bin/claude" <<'MOCK'
+#!/usr/bin/env bash
+env | grep '^BASH_.*TIMEOUT_MS=' | sort > "$PWD/claude-env"
+exit 1
+MOCK
+    chmod +x "$TEST_DIR/bin/claude"
+}
+
+@test "claude is started with a 45-minute command time limit" {
+    "$RALPH" init
+    mock_claude_recording_timeouts
+    unset BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS
+
+    PATH="$TEST_DIR/bin:$PATH" run "$RALPH" build -n 1 --skip-push
+    [[ "$(cat claude-env)" == $'BASH_DEFAULT_TIMEOUT_MS=2700000\nBASH_MAX_TIMEOUT_MS=2700000' ]]
+}
+
+@test "a command time limit already in the environment wins" {
+    "$RALPH" init
+    mock_claude_recording_timeouts
+
+    BASH_DEFAULT_TIMEOUT_MS=60000 BASH_MAX_TIMEOUT_MS=90000 PATH="$TEST_DIR/bin:$PATH" \
+        run "$RALPH" build -n 1 --skip-push
+    [[ "$(cat claude-env)" == $'BASH_DEFAULT_TIMEOUT_MS=60000\nBASH_MAX_TIMEOUT_MS=90000' ]]
+}

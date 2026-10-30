@@ -9,6 +9,19 @@ CONFIG_DIR="${RALPH_CONFIG_DIR:-$HOME/.config/ralph}"
 PLAN_DEFAULT_CAP=6
 # Review is a single read-only pass by default; use -n to run more
 REVIEW_DEFAULT_CAP=1
+# A build iteration runs every test suite on each Nth iteration and on the
+# last one; the iterations between run only the tests their own change reaches
+# (see build_test_scope). --full-tests-every overrides it; 1 runs every suite
+# on every iteration.
+FULL_TESTS_DEFAULT_INTERVAL=10
+# How long one shell command may run under the claude backend, in ms (45 min).
+# Claude Code's own limit is 10 minutes, which a project's full test suites can
+# outrun. An agent then starts the suite in the background and ends its turn
+# to wait for it, and a headless session that ends its turn has ended: the
+# suite is abandoned and the iteration commits nothing. A limit longer than any
+# suite lets it run in the foreground instead. A value already in the
+# environment wins.
+CLAUDE_BASH_TIMEOUT_MS=2700000
 
 ARTIFACTS=(IMPLEMENTATION_PLAN.md PROGRESS.md LEARNINGS.md REVIEW.md PROMPT_plan.md PROMPT_build.md PROMPT_review.md)
 ARCHIVE_DIR=".ralph"
@@ -49,6 +62,10 @@ backend_claude() {
         # live activity log; the other backends return one blob at the end.
         BACKEND_STREAMS_EVENTS=true
         BACKEND_CMD=(claude -p "$BACKEND_PERMISSION_FLAG" --output-format=stream-json --model "$model" --verbose)
+        # See CLAUDE_BASH_TIMEOUT_MS. Exported rather than prefixed onto the
+        # command, so the command line --dry-run prints stays the one to run.
+        export BASH_DEFAULT_TIMEOUT_MS="${BASH_DEFAULT_TIMEOUT_MS:-$CLAUDE_BASH_TIMEOUT_MS}"
+        export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-$CLAUDE_BASH_TIMEOUT_MS}"
         # Only Claude takes --effort; the other backends ignore the argument.
         # Written as if/fi, not `[[ ]] &&`: as the function's last statement a
         # false test would return non-zero and trip the caller's errexit.
@@ -220,7 +237,13 @@ Options:
       --skip-push      Don't push after each build iteration (plan never pushes)
       --dry-run        Print what would be executed without running
       --no-metrics     Don't record per-iteration metrics under .ralph/metrics/
-  -s, --stream         Show a readable live activity log while each iteration
+      --full-tests-every N
+                       Build only: run every test suite on each Nth iteration
+                       and on the last one; the iterations between run only
+                       the tests their own change reaches (default: 10; 1 runs
+                       every suite on every iteration). Reaches the agent
+                       through {{TEST_SCOPE}} in the build prompt
+  -s, --stream        Show a readable live activity log while each iteration
                        runs (claude backend only; other backends return one
                        response at the end, so there is nothing to stream)
   -v, --verbose        Show backend commands, raw output, and exit codes
@@ -241,6 +264,7 @@ Examples:
   ralph build --iterations 5 --goal "Add PATCH endpoint"
   ralph build --max-retries-per-iteration 3
   ralph build --no-retry
+  ralph build --full-tests-every 10
   ralph review
   ralph review -g "Focus on FT-001 business-rule coverage"
   ralph sandbox
@@ -640,8 +664,10 @@ cmd_sandbox() {
         # — bake the PID into the trap command as a literal (double-quoted, so it
         # expands now) rather than referencing the variable name.
         if [[ -n "$sleep_inhibitor_pid" ]]; then
+            # `|| true` because the inhibitor may already be gone, and under
+            # `set -e` a failed kill in the trap turns a clean exit into status 1.
             # shellcheck disable=SC2064 # intentional: expand the PID now, before it goes out of scope
-            trap "kill $sleep_inhibitor_pid 2>/dev/null" EXIT
+            trap "kill $sleep_inhibitor_pid 2>/dev/null || true" EXIT
         fi
     fi
 
@@ -754,6 +780,32 @@ calculate_build_iterations() {
 
     # 20% headroom, rounded up: ceil(count * 1.2)
     echo $(( (count * 6 + 4) / 5 ))
+}
+
+# The test scope of one build iteration, as the sentence {{TEST_SCOPE}} in the
+# build prompt is replaced with. It opens with "Full" or "Targeted" so a prompt
+# can branch on the word, and says why so the agent need not work it out.
+#
+# Running every suite on every iteration pays the slowest suites' cost for
+# changes that cannot reach them, so only each Nth iteration does, and the ones
+# between run the tests their own change reaches. The last iteration is always
+# full, so a run never ends on a regression the targeted ones let through. The
+# loop can also end before max_iterations, when the plan runs out, so an
+# iteration taking the last open item counts as the last one too.
+build_test_scope() {
+    local iteration="$1" max_iterations="$2" interval="$3" open_items="$4"
+
+    if (( iteration == max_iterations )); then
+        echo "Full — iteration $iteration is the last of this run."
+    elif (( open_items <= 1 )); then
+        echo "Full — this iteration takes the last open plan item."
+    elif (( iteration % interval == 0 )); then
+        echo "Full — iteration $iteration of $max_iterations; every $interval iterations run every suite."
+    else
+        local next_full=$(( (iteration / interval + 1) * interval ))
+        (( next_full > max_iterations )) && next_full=$max_iterations
+        echo "Targeted — iteration $iteration of $max_iterations; the next full run is iteration $next_full."
+    fi
 }
 
 # Fingerprint the artifacts a plan iteration is allowed to change.
@@ -1203,6 +1255,7 @@ cmd_loop() {
     local no_retry=false
     local stream=false
     local no_metrics=false
+    local full_tests_every=$FULL_TESTS_DEFAULT_INTERVAL
 
     # Parsed by hand rather than with getopt(1). BSD getopt, which is what macOS
     # ships, does not understand --long and returns the whole invocation as
@@ -1224,6 +1277,7 @@ cmd_loop() {
             --plan-effort)               require_option_value "$@"; plan_effort="$2";     shift 2 ;;
             -b|--backend)                require_option_value "$@"; backend="$2";         shift 2 ;;
             --max-retries-per-iteration) require_option_value "$@"; max_retries_opt="$2"; shift 2 ;;
+            --full-tests-every)          require_option_value "$@"; full_tests_every="$2"; shift 2 ;;
             --skip-push)     skip_push=true;      shift ;;
             --dry-run)       dry_run=true;        shift ;;
             --no-metrics)    no_metrics=true;     shift ;;
@@ -1261,6 +1315,11 @@ cmd_loop() {
         max_retries=$max_retries_opt
     fi
     $no_retry && max_retries=0
+
+    if [[ ! "$full_tests_every" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: --full-tests-every must be a positive integer, got '$full_tests_every'" >&2
+        exit 1
+    fi
 
     # Fail fast if 'ralph init' hasn't been run — checked before any backend
     # resolution, CLI lookup, or git work so the user gets immediate feedback.
@@ -1451,15 +1510,22 @@ cmd_loop() {
         # silent until the backend finishes. Build mode works the plan top
         # down, so the first incomplete entry is what this iteration will
         # attempt; re-read each iteration because the previous one moves it.
+        local test_scope=""
         if [[ "$mode" == "build" ]]; then
-            local next_item
+            local next_item open_items
             # An unreadable plan must not abort the loop: announcing is a
             # convenience, so fall back to silence rather than failing.
             next_item=$(next_plan_item || true)
+            # Re-counted each iteration for the same reason: the previous one
+            # ticked an item, and may have appended or split one.
+            open_items=$(plan_items_body 2>/dev/null | grep -c '^- \[ \]' || true)
+            test_scope=$(build_test_scope "$iteration" "$max_iterations" \
+                "$full_tests_every" "${open_items:-0}")
             if [[ -n "$next_item" ]]; then
                 truncate_line "Next:    $next_item" "$line_width"
-                echo ""
             fi
+            truncate_line "Tests:   $test_scope" "$line_width"
+            echo ""
         fi
 
         # Snapshot HEAD to detect noops. Plan mode never commits, so it
@@ -1493,10 +1559,12 @@ cmd_loop() {
             plan_done_before=$(plan_items_body | grep -c '^- \[x\]' || true)
         fi
 
-        # Inject {{GOAL}} into prompt using bash substitution
+        # Inject {{GOAL}} and {{TEST_SCOPE}} into prompt using bash substitution.
+        # Only a build prompt carries {{TEST_SCOPE}}; the others test nothing.
         local prompt
         prompt=$(<"$prompt_file")
         prompt="${prompt//\{\{GOAL\}\}/${goal:-No specific goal provided}}"
+        prompt="${prompt//\{\{TEST_SCOPE\}\}/$test_scope}"
 
         if $dry_run; then
             if [[ "$BACKEND_STDIN_PROMPT" == "true" ]]; then
